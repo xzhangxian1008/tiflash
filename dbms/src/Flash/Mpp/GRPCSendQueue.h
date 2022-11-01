@@ -208,7 +208,7 @@ public:
     }
 
 private:
-    friend class tests::TestGRPCSendQueue;
+    friend class tests::TestGRPCSendQueue; 
 
     void * kickTagAction()
     {

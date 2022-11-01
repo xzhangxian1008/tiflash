@@ -552,10 +552,11 @@ void ExchangeReceiverBase<RPCContext>::reactor(const std::vector<Request> & asyn
         for (Int32 i = 0; i < check_waiting_requests_freq; ++i)
         {
             AsyncHandler * handler = nullptr;
+            // get a request that has data to read
             if (unlikely(ready_requests.popTimeout(handler, timeout) != MPMCQueueResult::OK))
                 break;
 
-            handler->handle();
+            handler->handle(); // read or push data here
             if (handler->finished())
             {
                 --alive_async_connections;

@@ -105,6 +105,7 @@ struct MemTrackerWrapper
     size_t size = 0;
 };
 
+// data package that contains data
 struct TrackedMppDataPacket
 {
     explicit TrackedMppDataPacket(const mpp::MPPDataPacket & data, MemoryTracker * memory_tracker)

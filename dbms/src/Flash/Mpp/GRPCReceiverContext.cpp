@@ -76,6 +76,9 @@ struct GrpcExchangePacketReader : public ExchangePacketReader
     void cancel(const String &) override {}
 };
 
+// class that actually do the grpc async read
+// we can see it as a device that do the reader opr
+// This class reveives data and gives it's reader to the data, then data call this reader to read data. Very strange!
 struct AsyncGrpcExchangePacketReader : public AsyncExchangePacketReader
 {
     pingcap::kv::Cluster * cluster;
