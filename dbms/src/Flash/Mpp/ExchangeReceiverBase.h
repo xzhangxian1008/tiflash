@@ -14,21 +14,26 @@
 
 #pragma once
 
+#include <Common/FailPoint.h>
+#include <Common/MPMCQueue.h>
+#include <Common/MemoryTracker.h>
 #include <Common/ThreadManager.h>
-#include <Flash/Mpp/AsyncRequestHandler.h>
-#include <Flash/Coprocessor/ChunkDecodeAndSquash.h>
-#include <Flash/Coprocessor/DAGUtils.h>
-#include <Flash/Mpp/GRPCReceiverContext.h>
+#include <Flash/Coprocessor/CHBlockChunkCodec.h>
+#include <Flash/Coprocessor/ChunkCodec.h>
+#include <Flash/Coprocessor/DecodeDetail.h>
+#include <Flash/Coprocessor/FineGrainedShuffle.h>
 #include <Flash/Mpp/ReceiverChannelWriter.h>
-#include <Interpreters/Context.h>
+#include <Storages/StorageDisaggregated.h>
+#include <common/defines.h>
+#include <kvproto/mpp.pb.h>
+#include <tipb/executor.pb.h>
+#include <tipb/select.pb.h>
 
-#include <future>
-#include <mutex>
-#include <thread>
+#include <cerrno>
+
 
 namespace DB
 {
-constexpr Int32 batch_packet_count = 16;
 
 struct ExchangeReceiverResult
 {
@@ -84,7 +89,6 @@ enum class ExchangeReceiverState
     CLOSED,
 };
 
-template <typename RPCContext>
 class ExchangeReceiverBase
 {
 public:
@@ -93,17 +97,28 @@ public:
 
 public:
     ExchangeReceiverBase(
-        std::shared_ptr<RPCContext> rpc_context_,
         size_t source_num_,
         size_t max_streams_,
         const String & req_id,
         const String & executor_id,
-        uint64_t fine_grained_shuffle_stream_count,
-        const std::vector<StorageDisaggregated::RequestAndRegionIDs> & disaggregated_dispatch_reqs_ = {});
+        uint64_t fine_grained_shuffle_stream_count_,
+        const std::vector<StorageDisaggregated::RequestAndRegionIDs> & disaggregated_dispatch_reqs_ = {})
+        : source_num(source_num_)
+        , enable_fine_grained_shuffle_flag(enableFineGrainedShuffle(fine_grained_shuffle_stream_count_))
+        , output_stream_count(enable_fine_grained_shuffle_flag ? std::min(max_streams_, fine_grained_shuffle_stream_count_) : max_streams_)
+        , max_buffer_size(std::max(source_num, max_streams_) * 2)
+        , thread_manager(newThreadManager())
+        , live_connections(source_num)
+        , state(ExchangeReceiverState::NORMAL)
+        , exc_log(Logger::get(req_id, executor_id))
+        , local_conn_num(0)
+        , async_conn_num(0)
+        , collected(false)
+        , memory_tracker(current_memory_tracker)
+        , disaggregated_dispatch_reqs(disaggregated_dispatch_reqs_)
+    {}
 
     ~ExchangeReceiverBase();
-
-    void cancel();
 
     void close();
 
@@ -117,7 +132,6 @@ public:
 
     size_t getSourceNum() const { return source_num; }
     uint64_t getFineGrainedShuffleStreamCount() const { return enable_fine_grained_shuffle_flag ? output_stream_count : 0; }
-
     int getExternalThreadCnt() const { return thread_count; }
     std::vector<MsgChannelPtr> & getMsgChannels() { return msg_channels; }
 
@@ -127,35 +141,25 @@ public:
         bool meet_error,
         const String & local_err_msg,
         const LoggerPtr & log);
-    
+
     void connectionAsyncDone(
         bool meet_error,
-        const String & async_err_msg,
+        const String & local_err_msg,
         const LoggerPtr & log);
-    
+
     void connectionDoneImpl(
         bool meet_error,
-        const String & err_msg,
+        const String & local_err_msg,
         const LoggerPtr & log,
-        Int32 & specific_conn_num,
-        const String & msg);
+        Int32 & conn,
+        const String & log_msg);
 
-    MemoryTracker * getMemoryTracker() const { return mem_tracker.get(); }
+    MemoryTracker * getMemoryTracker() const { return memory_tracker; }
 
     std::atomic<Int64> * getDataSizeInQueue() { return &data_size_in_queue; }
 
-private:
+protected:
     std::shared_ptr<MemoryTracker> mem_tracker;
-    using Request = typename RPCContext::Request;
-    using AsyncHandlerFineGrained = AsyncRequestHandler<RPCContext, true>;
-    using AsyncHandlerNonFineGrained = AsyncRequestHandler<RPCContext, false>;
-
-    // Template argument enable_fine_grained_shuffle will be setup properly in setUpConnection().
-    template <bool enable_fine_grained_shuffle>
-    void readLoop(const Request & req);
-    template <bool enable_fine_grained_shuffle>
-    void reactor(const std::vector<Request> & async_requests);
-    void setUpConnection();
 
     bool setEndState(ExchangeReceiverState new_state);
     String getStatusString();
@@ -164,7 +168,7 @@ private:
         std::queue<Block> & block_queue,
         std::unique_ptr<CHBlockChunkDecodeAndSquash> & decoder_ptr);
 
-    DecodeDetail decodeChunks(
+    static DecodeDetail decodeChunks(
         const std::shared_ptr<ReceivedMessage> & recv_msg,
         std::queue<Block> & block_queue,
         std::unique_ptr<CHBlockChunkDecodeAndSquash> & decoder_ptr);
@@ -188,7 +192,7 @@ private:
         const std::shared_ptr<ReceivedMessage> & recv_msg,
         std::unique_ptr<CHBlockChunkDecodeAndSquash> & decoder_ptr);
 
-private:
+protected:
     void prepareMsgChannels();
 
     bool isReceiverForTiFlashStorage()
@@ -196,8 +200,6 @@ private:
         // If not empty, need to send MPPTask to tiflash_storage.
         return !disaggregated_dispatch_reqs.empty();
     }
-
-    std::shared_ptr<RPCContext> rpc_context;
 
     const tipb::ExchangeReceiver pb_exchange_receiver;
     const size_t source_num;
@@ -225,20 +227,38 @@ private:
 
     bool collected = false;
     int thread_count = 0;
+    MemoryTracker * memory_tracker;
 
-    std::atomic<Int64> data_size_in_queue;
+    std::atomic<Int64> data_size_in_queue{};
 
     // For tiflash_compute node, need to send MPPTask to tiflash_storage node.
     std::vector<StorageDisaggregated::RequestAndRegionIDs> disaggregated_dispatch_reqs;
-    std::vector<AsyncHandlerFineGrained> async_handlers_fine_grained;
-    std::vector<AsyncHandlerNonFineGrained> async_handlers_non_fine_grained;
 };
 
-class ExchangeReceiver : public ExchangeReceiverBase<GRPCReceiverContext>
+struct SupportForLocalExchange
 {
-public:
-    using Base = ExchangeReceiverBase<GRPCReceiverContext>;
-    using Base::Base;
-};
+    SupportForLocalExchange(
+        MemoryTracker * recv_mem_tracker_,
+        std::function<void(bool, const String &)> && notify_receiver_,
+        ReceiverChannelWriter && channel_writer_)
+        : recv_mem_tracker(recv_mem_tracker_)
+        , notify_receiver(std::move(notify_receiver_))
+        , channel_writer(std::move(channel_writer_))
+    {}
 
+    template <bool enable_fine_grained_shuffle>
+    bool write(size_t source_index, const TrackedMppDataPacketPtr & tracked_packet)
+    {
+        return channel_writer.write<enable_fine_grained_shuffle>(source_index, tracked_packet);
+    }
+
+    void connectionLocalDone(bool meet_error, const String & local_err_msg) const
+    {
+        notify_receiver(meet_error, local_err_msg);
+    }
+
+    MemoryTracker * recv_mem_tracker;
+    std::function<void(bool, const String &)> notify_receiver;
+    ReceiverChannelWriter channel_writer;
+};
 } // namespace DB
