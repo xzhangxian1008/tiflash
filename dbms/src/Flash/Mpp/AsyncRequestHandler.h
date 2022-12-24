@@ -144,7 +144,7 @@ private:
         has_data = true;
         reader->read(packet, thisAsUnaryCallback());
 
-        auto err_msg = getErrorFromPackets().empty();
+        auto err_msg = getErrorFromPackets();
         if (!(err_msg.empty()))
             connectionDone(fmt::format("Exchange receiver meet error : {}", err_msg));
     }

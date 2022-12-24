@@ -19,7 +19,6 @@
 #include <Flash/Coprocessor/ChunkDecodeAndSquash.h>
 #include <Flash/Coprocessor/DAGUtils.h>
 #include <Flash/Mpp/GRPCReceiverContext.h>
-#include <Flash/Mpp/ReceiverChannelWriter.h>
 #include <Interpreters/Context.h>
 
 #include <future>
@@ -123,23 +122,6 @@ public:
 
     bool isFineGrainedShuffleEnabled() const { return enable_fine_grained_shuffle_flag; }
 
-    void connectionLocalDone(
-        bool meet_error,
-        const String & local_err_msg,
-        const LoggerPtr & log);
-    
-    void connectionAsyncDone(
-        bool meet_error,
-        const String & async_err_msg,
-        const LoggerPtr & log);
-    
-    void connectionDoneImpl(
-        bool meet_error,
-        const String & err_msg,
-        const LoggerPtr & log,
-        Int32 & specific_conn_num,
-        const String & msg);
-
     MemoryTracker * getMemoryTracker() const { return mem_tracker.get(); }
 
     std::atomic<Int64> * getDataSizeInQueue() { return &data_size_in_queue; }
@@ -155,7 +137,11 @@ private:
     void readLoop(const Request & req);
     template <bool enable_fine_grained_shuffle>
     void reactor(const std::vector<Request> & async_requests);
-    void setUpConnection();
+
+    void setUpConnections();
+    void setUpLocalConnection(const ExchangeRecvRequest & req);
+    void setUpSyncConnection(const ExchangeRecvRequest & req);
+    void setUpAsyncConnection(const ExchangeRecvRequest & req);
 
     bool setEndState(ExchangeReceiverState new_state);
     String getStatusString();
@@ -174,10 +160,7 @@ private:
         const String & local_err_msg,
         const LoggerPtr & log);
 
-    // Local tunnel sender holds the pointer of ExchangeReceiverBase, so we must
-    // ensure that ExchangeReceiverBase is destructed after all tunnel senders.
-    void waitAllLocalConnDone();
-    void waitAllAsyncConnDone();
+    void waitAllConnectionDone();
 
     void finishAllMsgChannels();
     void cancelAllMsgChannels();
@@ -197,6 +180,14 @@ private:
         return !disaggregated_dispatch_reqs.empty();
     }
 
+    void clearHandlers()
+    {
+        for (auto * handler : async_handlers_fine_grained)
+            delete handler;
+        for (auto * handler : async_handlers_non_fine_grained)
+            delete handler;
+    }
+
     std::shared_ptr<RPCContext> rpc_context;
 
     const tipb::ExchangeReceiver pb_exchange_receiver;
@@ -212,16 +203,13 @@ private:
     std::vector<MsgChannelPtr> msg_channels;
 
     std::mutex mu;
+    std::condition_variable cv;
     /// should lock `mu` when visit these members
     Int32 live_connections;
     ExchangeReceiverState state;
     String err_msg;
 
     LoggerPtr exc_log;
-
-    Int32 local_conn_num;
-    Int32 async_conn_num;
-    std::condition_variable conn_cv;
 
     bool collected = false;
     int thread_count = 0;
@@ -230,8 +218,8 @@ private:
 
     // For tiflash_compute node, need to send MPPTask to tiflash_storage node.
     std::vector<StorageDisaggregated::RequestAndRegionIDs> disaggregated_dispatch_reqs;
-    std::vector<AsyncHandlerFineGrained> async_handlers_fine_grained;
-    std::vector<AsyncHandlerNonFineGrained> async_handlers_non_fine_grained;
+    std::vector<AsyncHandlerFineGrained *> async_handlers_fine_grained;
+    std::vector<AsyncHandlerNonFineGrained *> async_handlers_non_fine_grained;
 };
 
 class ExchangeReceiver : public ExchangeReceiverBase<GRPCReceiverContext>
