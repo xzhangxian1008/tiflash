@@ -90,16 +90,15 @@ public:
             else
             {
                 stage = AsyncRequestStage::WAIT_READ;
-                receivePacket();
-                sendPacket();
+                waitForPacketAsyncly();
             }
             break;
         }
         case AsyncRequestStage::WAIT_READ:
             if (ok)
             {
-                receivePacket();
                 sendPacket();
+                waitForPacketAsyncly();
             }
             else
             {
@@ -139,14 +138,9 @@ public:
     const LoggerPtr & getLog() const { return log; }
 
 private:
-    void receivePacket()
+    void waitForPacketAsyncly()
     {
-        has_data = true;
         reader->read(packet, thisAsUnaryCallback());
-
-        auto err_msg = getErrorFromPackets();
-        if (!(err_msg.empty()))
-            connectionDone(fmt::format("Exchange receiver meet error : {}", err_msg));
     }
 
     String getErrorFromPackets()
@@ -214,10 +208,19 @@ private:
 
     void sendPacket()
     {
+        auto err_msg = getErrorFromPackets();
+        if (!(err_msg.empty()))
+        {
+            connectionDone(fmt::format("Exchange receiver meet error : {}", err_msg));
+            return;
+        }
+
+        has_data = true;
+        // TODO try to write and handle the blocking
         if (!channel_writer.write<enable_fine_grained_shuffle>(request->source_index, packet))
         {
-            // 
             stage = AsyncRequestStage::FINISHED;
+            return;
         }
 
         // can't reuse packet since it is sent to readers.
