@@ -250,7 +250,7 @@ public:
             else if (read_packet_index < batch_packet_count)
             {
                 stage = AsyncRequestStage::WAIT_FINISH;
-                reader->finish(finish_status, thisAsUnaryCallback());
+                // TODO undo it
             }
             else
             {
