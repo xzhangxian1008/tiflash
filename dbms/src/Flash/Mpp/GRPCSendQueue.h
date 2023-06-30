@@ -16,7 +16,7 @@
 
 #include <Common/Exception.h>
 #include <Common/Logger.h>
-#include <Common/MPMCQueue.h>
+#include <Common/LooseBoundedMPMCQueue.h>
 #include <Common/grpcpp.h>
 #include <common/logger_useful.h>
 
@@ -32,10 +32,10 @@ class TestGRPCSendQueue;
 
 /// In grpc cpp framework, the tag that is pushed into grpc completion
 /// queue must be inherited from `CompletionQueueTag`.
-class KickTag : public grpc::internal::CompletionQueueTag
+class KickSendTag : public grpc::internal::CompletionQueueTag
 {
 public:
-    explicit KickTag(std::function<void *()> a)
+    explicit KickSendTag(std::function<void *()> a)
         : action(std::move(a))
     {}
 
@@ -51,7 +51,7 @@ private:
     std::function<void *()> action;
 };
 
-using GRPCKickFunc = std::function<grpc_call_error(KickTag *)>;
+using GRPCSendKickFunc = std::function<grpc_call_error(KickSendTag *)>;
 
 enum class GRPCSendQueueRes
 {
@@ -77,10 +77,12 @@ template <typename T>
 class GRPCSendQueue
 {
 public:
-    GRPCSendQueue(size_t queue_size, grpc_call * call, const LoggerPtr & l)
-        : send_queue(queue_size)
+    using ElementAuxiliaryMemoryUsageFunc = std::function<Int64(const T & element)>;
+
+    GRPCSendQueue(const CapacityLimits & queue_limits, ElementAuxiliaryMemoryUsageFunc && get_auxiliary_memory_usage, grpc_call * call, const LoggerPtr & l)
+        : send_queue(queue_limits, std::move(get_auxiliary_memory_usage))
         , log(l)
-        , kick_tag([this]() { return kickTagAction(); })
+        , kick_send_tag([this]() { return kickTagAction(); })
     {
         RUNTIME_ASSERT(call != nullptr, log, "call is null");
         // If a call to `grpc_call_start_batch` with an empty batch returns
@@ -92,16 +94,16 @@ public:
     }
 
     // For gtest usage.
-    GRPCSendQueue(size_t queue_size, GRPCKickFunc func)
-        : send_queue(queue_size)
+    GRPCSendQueue(const CapacityLimits & queue_limits, ElementAuxiliaryMemoryUsageFunc && get_auxiliary_memory_usage, GRPCSendKickFunc func)
+        : send_queue(queue_limits, std::move(get_auxiliary_memory_usage))
         , log(Logger::get())
         , kick_func(func)
-        , kick_tag([this]() { return kickTagAction(); })
+        , kick_send_tag([this]() { return kickTagAction(); })
     {}
 
     ~GRPCSendQueue()
     {
-        std::unique_lock lock(mu);
+        std::lock_guard lock(mu);
 
         RUNTIME_ASSERT(status == Status::NONE, log, "status {} is not none", magic_enum::enum_name(status));
     }
@@ -110,10 +112,19 @@ public:
     ///
     /// Return true if push succeed.
     /// Else return false.
-    template <typename U>
-    bool push(U && u)
+    bool push(T && data)
     {
-        auto ret = send_queue.push(std::forward<U>(u)) == MPMCQueueResult::OK;
+        auto ret = send_queue.push(std::move(data)) == MPMCQueueResult::OK;
+        if (ret)
+        {
+            kickCompletionQueue();
+        }
+        return ret;
+    }
+
+    bool forcePush(T && data)
+    {
+        auto ret = send_queue.forcePush(std::move(data)) == MPMCQueueResult::OK;
         if (ret)
         {
             kickCompletionQueue();
@@ -153,27 +164,19 @@ public:
         RUNTIME_ASSERT(new_tag != nullptr, log, "new_tag is nullptr");
 
         auto res = send_queue.tryPop(data);
-        switch (res)
+        if (res == MPMCQueueResult::EMPTY)
         {
-        case MPMCQueueResult::OK:
-            return GRPCSendQueueRes::OK;
-        case MPMCQueueResult::FINISHED:
-            return GRPCSendQueueRes::FINISHED;
-        case MPMCQueueResult::CANCELLED:
-            return GRPCSendQueueRes::CANCELLED;
-        case MPMCQueueResult::EMPTY:
-            // Handle this case later.
-            break;
-        default:
-            RUNTIME_ASSERT(false, log, "Result {} is invalid", static_cast<Int32>(res));
+            // Double check if this queue is empty.
+            std::unique_lock lock(mu);
+            RUNTIME_ASSERT(status == Status::NONE, log, "status {} is not none", magic_enum::enum_name(status));
+            res = send_queue.tryPop(data);
+            if (res == MPMCQueueResult::EMPTY)
+            {
+                // If empty, change status to WAITING.
+                status = Status::WAITING;
+                tag = new_tag;
+            }
         }
-
-        std::unique_lock lock(mu);
-
-        RUNTIME_ASSERT(status == Status::NONE, log, "status {} is not none", magic_enum::enum_name(status));
-
-        // Double check if this queue is empty.
-        res = send_queue.tryPop(data);
         switch (res)
         {
         case MPMCQueueResult::OK:
@@ -183,12 +186,7 @@ public:
         case MPMCQueueResult::CANCELLED:
             return GRPCSendQueueRes::CANCELLED;
         case MPMCQueueResult::EMPTY:
-        {
-            // If empty, change status to WAITING.
-            status = Status::WAITING;
-            tag = new_tag;
             return GRPCSendQueueRes::EMPTY;
-        }
         default:
             RUNTIME_ASSERT(false, log, "Result {} is invalid", magic_enum::enum_name(res));
         }
@@ -207,12 +205,17 @@ public:
         return ret;
     }
 
+    bool isWritable() const
+    {
+        return send_queue.isWritable();
+    }
+
 private:
     friend class tests::TestGRPCSendQueue; 
 
     void * kickTagAction()
     {
-        std::unique_lock lock(mu);
+        std::lock_guard lock(mu);
 
         RUNTIME_ASSERT(status == Status::QUEUING, log, "status {} is not queuing", magic_enum::enum_name(status));
         status = Status::NONE;
@@ -224,21 +227,19 @@ private:
     void kickCompletionQueue()
     {
         {
-            std::unique_lock lock(mu);
+            std::lock_guard lock(mu);
             if (status != Status::WAITING)
-            {
                 return;
-            }
             RUNTIME_ASSERT(tag != nullptr, log, "status is waiting but tag is nullptr");
             status = Status::QUEUING;
         }
 
-        grpc_call_error error = kick_func(&kick_tag);
+        grpc_call_error error = kick_func(&kick_send_tag);
         // If an error occur, there must be something wrong about shutdown process.
         RUNTIME_ASSERT(error == grpc_call_error::GRPC_CALL_OK, log, "grpc_call_start_batch returns {} != GRPC_CALL_OK, memory of tag may leak", error);
     }
 
-    MPMCQueue<T> send_queue;
+    LooseBoundedMPMCQueue<T> send_queue;
 
     const LoggerPtr log;
 
@@ -270,9 +271,9 @@ private:
     Status status = Status::NONE;
     void * tag = nullptr;
 
-    GRPCKickFunc kick_func;
+    GRPCSendKickFunc kick_func;
 
-    KickTag kick_tag;
+    KickSendTag kick_send_tag;
 };
 
 } // namespace DB

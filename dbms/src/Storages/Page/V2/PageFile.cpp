@@ -22,12 +22,14 @@
 #include <Poco/File.h>
 #include <Storages/Page/PageUtil.h>
 #include <Storages/Page/V2/PageFile.h>
-#include <Storages/Page/WriteBatch.h>
+#include <Storages/Page/WriteBatchImpl.h>
 #include <boost_wrapper/string_split.h>
 #include <common/logger_useful.h>
 
 #include <boost/algorithm/string/classification.hpp>
 #include <ext/scope_guard.h>
+#include <magic_enum.hpp>
+#include <span>
 
 #ifndef __APPLE__
 #include <fcntl.h>
@@ -84,7 +86,7 @@ static const size_t PAGE_META_SIZE = sizeof(PageId) + sizeof(PageFileId) + sizeo
     + sizeof(PageOffset) + sizeof(PageSize) + sizeof(Checksum);
 
 /// Return <data to write into meta file, data to write into data file>.
-std::pair<ByteBuffer, ByteBuffer> genWriteData( //
+std::pair<std::span<char>, std::span<char>> genWriteData( //
     DB::WriteBatch & wb,
     PageFile & page_file,
     PageEntriesEdit & edit)
@@ -94,7 +96,7 @@ std::pair<ByteBuffer, ByteBuffer> genWriteData( //
 
     meta_write_bytes += sizeof(WBSize) + sizeof(PageFormat::Version) + sizeof(WriteBatch::SequenceID);
 
-    for (auto & write : wb.getWrites())
+    for (auto & write : wb.getMutWrites())
     {
         meta_write_bytes += sizeof(IsPut);
         // We don't serialize `PUT_EXTERNAL` for V2, just convert it to `PUT`
@@ -120,7 +122,10 @@ std::pair<ByteBuffer, ByteBuffer> genWriteData( //
             meta_write_bytes += (sizeof(PageId) + sizeof(PageId));
             break;
         case WriteBatchWriteType::PUT_EXTERNAL:
-            throw Exception("Should not serialize with `PUT_EXTERNAL`");
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Should not serialize with {}", magic_enum::enum_name(write.type));
+            break;
+        default:
+            throw Exception(fmt::format("Unknown write {}", static_cast<Int32>(write.type)), ErrorCodes::LOGICAL_ERROR);
             break;
         }
     }
@@ -138,7 +143,7 @@ std::pair<ByteBuffer, ByteBuffer> genWriteData( //
     PageUtil::put(meta_pos, wb.getSequence());
 
     PageOffset page_data_file_off = page_file.getDataFileAppendPos();
-    for (auto & write : wb.getWrites())
+    for (auto & write : wb.getMutWrites())
     {
         // We don't serialize `PUT_EXTERNAL` for V2, just convert it to `PUT`
         if (write.type == WriteBatchWriteType::PUT_EXTERNAL)
@@ -232,6 +237,9 @@ std::pair<ByteBuffer, ByteBuffer> genWriteData( //
             PageUtil::put(meta_pos, static_cast<PageId>(write.ori_page_id));
 
             edit.ref(write.page_id, write.ori_page_id);
+            break;
+        default:
+            throw Exception(fmt::format("Unknown write {}", static_cast<Int32>(write.type)), ErrorCodes::LOGICAL_ERROR);
             break;
         }
     }
@@ -438,6 +446,9 @@ bool PageFile::LinkingMetaAdapter::linkToNewSequenceNext(WriteBatch::SequenceID 
             pos += sizeof(PageId);
             break;
         }
+        default:
+            throw Exception(fmt::format("Unknown write {}", static_cast<Int32>(write_type)), ErrorCodes::LOGICAL_ERROR);
+            break;
         }
     }
 
@@ -685,6 +696,9 @@ void PageFile::MetaMergingReader::moveNext(PageFormat::Version * v)
             curr_edit.ref(ref_id, page_id);
             break;
         }
+        default:
+            throw Exception(fmt::format("Unknown write {}", static_cast<Int32>(write_type)), ErrorCodes::LOGICAL_ERROR);
+            break;
         }
     }
     // move `pos` over the checksum of WriteBatch
@@ -785,17 +799,17 @@ size_t PageFile::Writer::write(DB::WriteBatch & wb, PageEntriesEdit & edit, cons
     }
 
     // TODO: investigate if not copy data into heap, write big pages can be faster?
-    ByteBuffer meta_buf, data_buf;
+    std::span<char> meta_buf, data_buf;
     std::tie(meta_buf, data_buf) = PageMetaFormat::genWriteData(wb, page_file, edit);
 
-    SCOPE_EXIT({ page_file.free(meta_buf.begin(), meta_buf.size()); });
-    SCOPE_EXIT({ page_file.free(data_buf.begin(), data_buf.size()); });
+    SCOPE_EXIT({ page_file.free(meta_buf.data(), meta_buf.size()); });
+    SCOPE_EXIT({ page_file.free(data_buf.data(), data_buf.size()); });
 
-    auto write_buf = [&](WritableFilePtr & file, UInt64 offset, ByteBuffer buf, bool enable_failpoint) {
+    auto write_buf = [&](WritableFilePtr & file, UInt64 offset, std::span<char> buf, bool enable_failpoint) {
         PageUtil::writeFile(
             file,
             offset,
-            buf.begin(),
+            buf.data(),
             buf.size(),
             write_limiter,
             background,
@@ -918,11 +932,18 @@ PageMap PageFile::Reader::read(PageIdAndEntries & to_read, const ReadLimiterPtr 
             }
         }
 
-        Page page;
-        page.page_id = page_id;
-        page.data = ByteBuffer(pos, pos + entry.size);
+        Page page(page_id);
+        page.data = std::string_view(pos, entry.size);
         page.mem_holder = mem_holder;
-        page_map.emplace(page_id, page);
+
+        // Calculate the field_offsets from page entry
+        for (size_t index = 0; index < entry.field_offsets.size(); index++)
+        {
+            const auto offset = entry.field_offsets[index].first;
+            page.field_offsets.emplace(index, offset);
+        }
+
+        page_map.emplace(page_id, std::move(page));
 
         pos += entry.size;
     }
@@ -933,63 +954,6 @@ PageMap PageFile::Reader::read(PageIdAndEntries & to_read, const ReadLimiterPtr 
     last_read_time = Clock::now();
 
     return page_map;
-}
-
-void PageFile::Reader::read(PageIdAndEntries & to_read, const PageHandler & handler, const ReadLimiterPtr & read_limiter)
-{
-    ProfileEvents::increment(ProfileEvents::PSMReadPages, to_read.size());
-
-    // Sort in ascending order by offset in file.
-    std::sort(to_read.begin(), to_read.end(), [](const PageIdAndEntry & a, const PageIdAndEntry & b) {
-        return a.second.offset < b.second.offset;
-    });
-
-    size_t buf_size = 0;
-    for (const auto & p : to_read)
-        buf_size = std::max(buf_size, p.second.size);
-
-    char * data_buf = static_cast<char *>(alloc(buf_size));
-    MemHolder mem_holder = createMemHolder(data_buf, [&, buf_size](char * p) { free(p, buf_size); });
-
-
-    auto it = to_read.begin();
-    while (it != to_read.end())
-    {
-        auto && [page_id, entry] = *it;
-
-        PageUtil::readFile(data_file, entry.offset, data_buf, entry.size, read_limiter);
-
-        if constexpr (PAGE_CHECKSUM_ON_READ)
-        {
-            auto checksum = CityHash_v1_0_2::CityHash64(data_buf, entry.size);
-            if (unlikely(entry.size != 0 && checksum != entry.checksum))
-            {
-                std::stringstream ss;
-                ss << ", expected: " << std::hex << entry.checksum << ", but: " << checksum;
-                throw Exception("Page [" + DB::toString(page_id) + "] checksum not match, broken file: " + data_file_path + ss.str(),
-                                ErrorCodes::CHECKSUM_DOESNT_MATCH);
-            }
-        }
-
-        Page page;
-        page.page_id = page_id;
-        page.data = ByteBuffer(data_buf, data_buf + entry.size);
-        page.mem_holder = mem_holder;
-
-        ++it;
-
-        //#ifndef __APPLE__
-        //        if (it != to_read.end())
-        //        {
-        //            auto & next_page_cache = it->second;
-        //            ::posix_fadvise(data_file_fd, next_page_cache.offset, next_page_cache.size, POSIX_FADV_WILLNEED);
-        //        }
-        //#endif
-
-        handler(page_id, page);
-    }
-
-    last_read_time = Clock::now();
 }
 
 PageMap PageFile::Reader::read(PageFile::Reader::FieldReadInfos & to_read, const ReadLimiterPtr & read_limiter)
@@ -1057,9 +1021,8 @@ PageMap PageFile::Reader::read(PageFile::Reader::FieldReadInfos & to_read, const
             write_offset += size_to_read;
         }
 
-        Page page;
-        page.page_id = page_id;
-        page.data = ByteBuffer(pos, write_offset);
+        Page page(page_id);
+        page.data = std::string_view(pos, write_offset - pos);
         page.mem_holder = mem_holder;
         page.field_offsets.swap(fields_offset_in_page);
         fields_offset_in_page.clear();
@@ -1092,7 +1055,6 @@ Page PageFile::Reader::read(FieldReadInfo & to_read, const ReadLimiterPtr & read
     char * data_buf = static_cast<char *>(alloc(buf_size));
     MemHolder mem_holder = createMemHolder(data_buf, [&, buf_size](char * p) { free(p, buf_size); });
 
-    Page page_rc;
     std::set<FieldOffsetInsidePage> fields_offset_in_page;
 
     size_t read_size_this_entry = 0;
@@ -1129,9 +1091,8 @@ Page PageFile::Reader::read(FieldReadInfo & to_read, const ReadLimiterPtr & read
         }
     }
 
-    Page page;
-    page.page_id = to_read.page_id;
-    page.data = ByteBuffer(data_buf, write_offset);
+    Page page(to_read.page_id);
+    page.data = std::string_view(data_buf, write_offset - data_buf);
     page.mem_holder = mem_holder;
     page.field_offsets.swap(fields_offset_in_page);
 

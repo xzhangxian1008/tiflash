@@ -1,4 +1,4 @@
-// Copyright 2022 PingCAP, Ltd.
+// Copyright 2023 PingCAP, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,9 +17,9 @@
 #include <DataStreams/IProfilingBlockInputStream.h>
 #include <Flash/Coprocessor/ArrowChunkCodec.h>
 #include <Flash/Coprocessor/CHBlockChunkCodec.h>
+#include <Flash/Coprocessor/ChunkDecodeAndSquash.h>
 #include <Flash/Coprocessor/DecodeDetail.h>
 #include <Flash/Coprocessor/DefaultChunkCodec.h>
-#include <Interpreters/Context.h>
 #include <common/logger_useful.h>
 
 #include <chrono>
@@ -79,20 +79,27 @@ public:
     CoprocessorReader(
         const DAGSchema & schema_,
         pingcap::kv::Cluster * cluster,
-        std::vector<pingcap::coprocessor::copTask> tasks,
+        std::vector<pingcap::coprocessor::CopTask> tasks,
         bool has_enforce_encode_type_,
-        int concurrency)
+        int concurrency_,
+        const pingcap::kv::LabelFilter & tiflash_label_filter_)
         : schema(schema_)
         , has_enforce_encode_type(has_enforce_encode_type_)
-        , resp_iter(std::move(tasks), cluster, concurrency, &Poco::Logger::get("pingcap/coprocessor"))
+        , resp_iter(std::move(tasks), cluster, concurrency_, &Poco::Logger::get("pingcap/coprocessor"), tiflash_label_filter_)
         , collected(false)
-        , concurrency_(concurrency)
-    {
-        resp_iter.open();
-    }
+        , concurrency(concurrency_)
+    {}
 
     const DAGSchema & getOutputSchema() const { return schema; }
 
+    // `open` will call the resp_iter's `open` to send coprocessor request.
+    void open()
+    {
+        resp_iter.open();
+        opened = true;
+    }
+
+    // `cancel` will call the resp_iter's `cancel` to abort the data receiving and prevent the next retry.
     void cancel() { resp_iter.cancel(); }
 
 
@@ -108,7 +115,7 @@ public:
             return detail;
 
         detail.packet_bytes = resp->ByteSizeLong();
-        for (int i = 0; i < chunk_size; i++)
+        for (int i = 0; i < chunk_size; ++i)
         {
             Block block;
             const tipb::Chunk & chunk = resp->chunks(i);
@@ -139,14 +146,28 @@ public:
         return detail;
     }
 
-    // stream_id is only meaningful for ExchagneReceiver.
-    CoprocessorReaderResult nextResult(std::queue<Block> & block_queue, const Block & header, size_t /*stream_id*/)
+    std::pair<pingcap::coprocessor::ResponseIter::Result, bool> nonBlockingNext()
     {
-        auto && [result, has_next] = resp_iter.next();
+        RUNTIME_CHECK(opened == true);
+        return resp_iter.nonBlockingNext();
+    }
+
+    CoprocessorReaderResult toResult(std::pair<pingcap::coprocessor::ResponseIter::Result, bool> & result_pair,
+                                     std::queue<Block> & block_queue,
+                                     const Block & header)
+    {
+        auto && [result, has_next] = result_pair;
+
         if (!result.error.empty())
             return {nullptr, true, result.error.message(), false};
+
         if (!has_next)
-            return {nullptr, false, "", true};
+        {
+            if (result.finished)
+                return {nullptr, false, "", true};
+            else
+                return {nullptr, false, "", false};
+        }
 
         auto resp = std::make_shared<tipb::SelectResponse>();
         if (resp->ParseFromString(result.data()))
@@ -156,12 +177,13 @@ public:
                 return {nullptr, true, resp->error().DebugString(), false};
             }
             else if (has_enforce_encode_type && resp->encode_type() != tipb::EncodeType::TypeCHBlock && resp->chunks_size() > 0)
-                return {
-                    nullptr,
-                    true,
-                    "Encode type of coprocessor response is not CHBlock, "
-                    "maybe the version of some TiFlash node in the cluster is not match with this one",
-                    false};
+            {
+                return {nullptr,
+                        true,
+                        "Encode type of coprocessor response is not CHBlock, "
+                        "maybe the version of some TiFlash node in the cluster is not match with this one",
+                        false};
+            }
             auto detail = decodeChunks(resp, block_queue, header, schema);
             return {resp, false, "", false, detail};
         }
@@ -171,27 +193,24 @@ public:
         }
     }
 
+    // stream_id, decoder_ptr are only meaningful for ExchagneReceiver.
+    CoprocessorReaderResult nextResult(std::queue<Block> & block_queue, const Block & header, size_t /*stream_id*/, std::unique_ptr<CHBlockChunkDecodeAndSquash> & /*decoder_ptr*/)
+    {
+        RUNTIME_CHECK(opened == true);
+
+        auto && result_pair = resp_iter.next();
+
+        return toResult(result_pair, block_queue, header);
+    }
+
     size_t getSourceNum() const { return 1; }
 
-    int computeNewThreadCount() const { return concurrency_; }
-
-    void collectNewThreadCount(int & cnt)
-    {
-        if (!collected)
-        {
-            collected = true;
-            cnt += computeNewThreadCount();
-        }
-    }
-
-    void resetNewThreadCountCompute()
-    {
-        collected = false;
-    }
+    int getExternalThreadCnt() const { return concurrency; }
 
     void close() {}
 
     bool collected = false;
-    int concurrency_;
+    int concurrency;
+    bool opened = false;
 };
 } // namespace DB

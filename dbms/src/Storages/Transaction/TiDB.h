@@ -47,52 +47,54 @@ namespace TiDB
 {
 using DB::ColumnID;
 using DB::DatabaseID;
+using DB::KeyspaceID;
+using DB::NullspaceID;
 using DB::String;
 using DB::TableID;
 using DB::Timestamp;
 
 // Column types.
 // In format:
-// TiDB type, int value, codec flag, CH type, should widen.
+// TiDB type, int value, codec flag, CH type.
 #ifdef M
 #error "Please undefine macro M first."
 #endif
-#define COLUMN_TYPES(M)                              \
-    M(Decimal, 0, Decimal, Decimal32, false)         \
-    M(Tiny, 1, VarInt, Int8, true)                   \
-    M(Short, 2, VarInt, Int16, true)                 \
-    M(Long, 3, VarInt, Int32, true)                  \
-    M(Float, 4, Float, Float32, false)               \
-    M(Double, 5, Float, Float64, false)              \
-    M(Null, 6, Nil, Nothing, false)                  \
-    M(Timestamp, 7, UInt, MyDateTime, false)         \
-    M(LongLong, 8, Int, Int64, false)                \
-    M(Int24, 9, VarInt, Int32, true)                 \
-    M(Date, 10, UInt, MyDate, false)                 \
-    M(Time, 11, Duration, Int64, false)              \
-    M(Datetime, 12, UInt, MyDateTime, false)         \
-    M(Year, 13, Int, Int16, false)                   \
-    M(NewDate, 14, Int, MyDate, false)               \
-    M(Varchar, 15, CompactBytes, String, false)      \
-    M(Bit, 16, VarInt, UInt64, false)                \
-    M(JSON, 0xf5, Json, String, false)               \
-    M(NewDecimal, 0xf6, Decimal, Decimal32, false)   \
-    M(Enum, 0xf7, VarUInt, Enum16, false)            \
-    M(Set, 0xf8, VarUInt, UInt64, false)             \
-    M(TinyBlob, 0xf9, CompactBytes, String, false)   \
-    M(MediumBlob, 0xfa, CompactBytes, String, false) \
-    M(LongBlob, 0xfb, CompactBytes, String, false)   \
-    M(Blob, 0xfc, CompactBytes, String, false)       \
-    M(VarString, 0xfd, CompactBytes, String, false)  \
-    M(String, 0xfe, CompactBytes, String, false)     \
-    M(Geometry, 0xff, CompactBytes, String, false)
+#define COLUMN_TYPES(M)                       \
+    M(Decimal, 0, Decimal, Decimal32)         \
+    M(Tiny, 1, VarInt, Int8)                  \
+    M(Short, 2, VarInt, Int16)                \
+    M(Long, 3, VarInt, Int32)                 \
+    M(Float, 4, Float, Float32)               \
+    M(Double, 5, Float, Float64)              \
+    M(Null, 6, Nil, Nothing)                  \
+    M(Timestamp, 7, UInt, MyDateTime)         \
+    M(LongLong, 8, Int, Int64)                \
+    M(Int24, 9, VarInt, Int32)                \
+    M(Date, 10, UInt, MyDate)                 \
+    M(Time, 11, Duration, Int64)              \
+    M(Datetime, 12, UInt, MyDateTime)         \
+    M(Year, 13, Int, Int16)                   \
+    M(NewDate, 14, Int, MyDate)               \
+    M(Varchar, 15, CompactBytes, String)      \
+    M(Bit, 16, VarInt, UInt64)                \
+    M(JSON, 0xf5, Json, String)               \
+    M(NewDecimal, 0xf6, Decimal, Decimal32)   \
+    M(Enum, 0xf7, VarUInt, Enum16)            \
+    M(Set, 0xf8, VarUInt, UInt64)             \
+    M(TinyBlob, 0xf9, CompactBytes, String)   \
+    M(MediumBlob, 0xfa, CompactBytes, String) \
+    M(LongBlob, 0xfb, CompactBytes, String)   \
+    M(Blob, 0xfc, CompactBytes, String)       \
+    M(VarString, 0xfd, CompactBytes, String)  \
+    M(String, 0xfe, CompactBytes, String)     \
+    M(Geometry, 0xff, CompactBytes, String)
 
 enum TP
 {
 #ifdef M
 #error "Please undefine macro M first."
 #endif
-#define M(tt, v, cf, ct, w) Type##tt = (v),
+#define M(tt, v, cf, ct) Type##tt = (v),
     COLUMN_TYPES(M)
 #undef M
 };
@@ -117,7 +119,8 @@ enum TP
     M(NoDefaultValue, (1 << 12)) \
     M(OnUpdateNow, (1 << 13))    \
     M(PartKey, (1 << 14))        \
-    M(Num, (1 << 15))
+    M(Num, (1 << 15))            \
+    M(GeneratedColumn, (1 << 23))
 
 enum ColumnFlag
 {
@@ -180,6 +183,7 @@ struct ColumnInfo
 
     ColumnID id = -1;
     String name;
+    Int32 offset = -1;
     Poco::Dynamic::Var origin_default_value;
     Poco::Dynamic::Var default_value;
     Poco::Dynamic::Var default_bit_value;
@@ -221,12 +225,6 @@ struct ColumnInfo
     static Int64 getTimeValue(const String &);
     static Int64 getYearValue(const String &);
     static UInt64 getBitValue(const String &);
-
-private:
-    /// please be very careful when you have to use offset,
-    /// because we never update offset when DDL action changes.
-    /// Thus, our offset will not exactly correspond the order of columns.
-    Int32 offset = -1;
 };
 
 enum PartitionType
@@ -273,13 +271,21 @@ struct PartitionInfo
 struct DBInfo
 {
     DatabaseID id = -1;
+    KeyspaceID keyspace_id = NullspaceID;
     String name;
     String charset;
     String collate;
     SchemaState state;
 
     DBInfo() = default;
-    explicit DBInfo(const String & json) { deserialize(json); }
+    explicit DBInfo(const String & json, KeyspaceID keyspace_id_)
+    {
+        deserialize(json);
+        if (keyspace_id == NullspaceID)
+        {
+            keyspace_id = keyspace_id_;
+        }
+    }
 
     String serialize() const;
 
@@ -292,10 +298,10 @@ using TableInfoPtr = std::shared_ptr<TableInfo>;
 struct TiFlashReplicaInfo
 {
     UInt64 count = 0;
+    std::optional<bool> available;
 
     /// Fields below are useless for tiflash now.
     // Strings location_labels
-    // bool available
     // std::vector<Int64> available_partition_ids;
 
     Poco::JSON::Object::Ptr getJSONObject() const;
@@ -314,11 +320,6 @@ struct IndexColumnInfo
 
     String name;
     Int32 length;
-
-private:
-    /// please be very careful when you have to use offset,
-    /// because we never update offset when DDL action changes.
-    /// Thus, our offset will not exactly correspond the order of columns.
     Int32 offset;
 };
 struct IndexInfo
@@ -351,9 +352,9 @@ struct TableInfo
 
     TableInfo & operator=(const TableInfo &) = default;
 
-    explicit TableInfo(Poco::JSON::Object::Ptr json);
+    explicit TableInfo(Poco::JSON::Object::Ptr json, KeyspaceID keyspace_id_);
 
-    explicit TableInfo(const String & table_info_json);
+    explicit TableInfo(const String & table_info_json, KeyspaceID keyspace_id_);
 
     String serialize() const;
 
@@ -366,6 +367,8 @@ struct TableInfo
     // and partition ID for partition table,
     // whereas field `belonging_table_id` below actually means the table ID this partition belongs to.
     TableID id = DB::InvalidTableID;
+    // The keyspace where the table belongs to.
+    KeyspaceID keyspace_id = NullspaceID;
     String name;
     // Columns are listed in the order in which they appear in the schema.
     std::vector<ColumnInfo> columns;
@@ -387,15 +390,16 @@ struct TableInfo
     bool is_view = false;
     // If the table is sequence, we should ignore it.
     bool is_sequence = false;
-    Int64 schema_version = DEFAULT_UNSPECIFIED_SCHEMA_VERSION;
+    Int64 schema_version = DEFAULT_UNSPECIFIED_SCHEMA_VERSION; // TODO(hyy):can be removed after removing RegionPtrWithBlock
 
     // The TiFlash replica info persisted by TiDB
     TiFlashReplicaInfo replica_info;
 
-    ::TiDB::StorageEngine engine_type = ::TiDB::StorageEngine::UNSPECIFIED;
+    ::TiDB::StorageEngine engine_type = ::TiDB::StorageEngine::UNSPECIFIED; // TODO(hyy):seems could be removed
 
     ColumnID getColumnID(const String & name) const;
     String getColumnName(ColumnID id) const;
+    KeyspaceID getKeyspaceID() const;
 
     const ColumnInfo & getColumnInfo(ColumnID id) const;
 
@@ -406,11 +410,6 @@ struct TableInfo
     bool isLogicalPartitionTable() const { return is_partition_table && belonging_table_id == DB::InvalidTableID && partition.enable; }
 
     /// should not be called if is_common_handle = false.
-    /// when use IndexInfo, please avoid to use the offset info
-    /// the offset value may be wrong in some cases,
-    /// due to we will not update IndexInfo except RENAME DDL action,
-    /// but DDL like add column / drop column may change the offset of columns
-    /// Thus, please be very careful when you must have to use offset information !!!!!
     const IndexInfo & getPrimaryIndexInfo() const { return index_infos[0]; }
 
     IndexInfo & getPrimaryIndexInfo() { return index_infos[0]; }
@@ -423,5 +422,6 @@ String genJsonNull();
 tipb::FieldType columnInfoToFieldType(const ColumnInfo & ci);
 ColumnInfo fieldTypeToColumnInfo(const tipb::FieldType & field_type);
 ColumnInfo toTiDBColumnInfo(const tipb::ColumnInfo & tipb_column_info);
+std::vector<ColumnInfo> toTiDBColumnInfos(const ::google::protobuf::RepeatedPtrField<tipb::ColumnInfo> & tipb_column_infos);
 
 } // namespace TiDB

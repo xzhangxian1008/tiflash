@@ -17,19 +17,22 @@
 #include <Common/Logger.h>
 #include <Common/nocopyable.h>
 #include <Storages/Transaction/ProxyFFI.h>
+#include <Storages/Transaction/RegionState.h>
 
 namespace DB
 {
 class SSTReader
 {
 public:
+    using RegionRangeFilter = ImutRegionRangePtr;
     virtual bool remained() const = 0;
     virtual BaseBuffView keyView() const = 0;
     virtual BaseBuffView valueView() const = 0;
     virtual void next() = 0;
 
-    virtual ~SSTReader(){};
+    virtual ~SSTReader() = default;
 };
+
 
 class MonoSSTReader : public SSTReader
 {
@@ -38,15 +41,20 @@ public:
     BaseBuffView keyView() const override;
     BaseBuffView valueView() const override;
     void next() override;
+    SSTFormatKind sst_format_kind() const { return kind; };
 
     DISALLOW_COPY_AND_MOVE(MonoSSTReader);
-    MonoSSTReader(const TiFlashRaftProxyHelper * proxy_helper_, SSTView view);
+    MonoSSTReader(const TiFlashRaftProxyHelper * proxy_helper_, SSTView view, RegionRangeFilter range_);
     ~MonoSSTReader() override;
 
 private:
     const TiFlashRaftProxyHelper * proxy_helper;
     SSTReaderPtr inner;
     ColumnFamilyType type;
+    RegionRangeFilter range;
+    SSTFormatKind kind;
+    mutable bool tail_checked;
+    Poco::Logger * log;
 };
 
 /// MultiSSTReader helps when there are multiple sst files in a column family.
@@ -60,7 +68,7 @@ template <typename R, typename E>
 class MultiSSTReader : public SSTReader
 {
 public:
-    using Initer = std::function<std::unique_ptr<R>(const TiFlashRaftProxyHelper *, E)>;
+    using Initer = std::function<std::unique_ptr<R>(const TiFlashRaftProxyHelper *, E, RegionRangeFilter)>;
 
     DISALLOW_COPY_AND_MOVE(MultiSSTReader);
 
@@ -81,12 +89,12 @@ public:
     {
         mono->next();
         // If there are no remained keys, we try to switch to next mono reader.
-        this->maybe_next_reader();
+        this->maybeNextReader();
     }
 
     // Switch to next mono reader if current is drained,
     // and we have a next sst file to read.
-    void maybe_next_reader() const
+    void maybeNextReader() const
     {
         if (!mono->remained())
         {
@@ -96,22 +104,23 @@ public:
                 // We don't drop if mono is the last instance for safety,
                 // and it will be dropped as MultiSSTReader is dropped.
                 LOG_INFO(log, "Open sst file {}", buffToStrView(args[current].path));
-                mono = initer(proxy_helper, args[current]);
+                mono = initer(proxy_helper, args[current], range);
             }
         }
     }
 
-    MultiSSTReader(const TiFlashRaftProxyHelper * proxy_helper_, ColumnFamilyType type_, Initer initer_, std::vector<E> args_)
-        : log(Logger::get("MultiSSTReader"))
+    MultiSSTReader(const TiFlashRaftProxyHelper * proxy_helper_, ColumnFamilyType type_, Initer initer_, std::vector<E> args_, LoggerPtr log_, RegionRangeFilter range_)
+        : log(log_)
         , proxy_helper(proxy_helper_)
         , type(type_)
         , initer(initer_)
         , args(args_)
         , current(0)
+        , range(range_)
     {
         assert(args.size() > 0);
-        LOG_INFO(log, "Open sst file first {}", buffToStrView(args[current].path));
-        mono = initer(proxy_helper, args[current]);
+        LOG_INFO(log, "Open sst file first {} range {}", buffToStrView(args[current].path), range->toDebugString());
+        mono = initer(proxy_helper, args[current], range);
     }
 
     ~MultiSSTReader() override
@@ -127,6 +136,7 @@ private:
     Initer initer;
     std::vector<E> args;
     mutable size_t current;
+    RegionRangeFilter range;
 };
 
 } // namespace DB

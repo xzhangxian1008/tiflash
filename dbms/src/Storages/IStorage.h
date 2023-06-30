@@ -37,6 +37,9 @@ using BlockOutputStreamPtr = std::shared_ptr<IBlockOutputStream>;
 using BlockInputStreamPtr = std::shared_ptr<IBlockInputStream>;
 using BlockInputStreams = std::vector<BlockInputStreamPtr>;
 
+class PipelineExecutorStatus;
+class PipelineExecGroupBuilder;
+
 class ASTCreateQuery;
 
 class IStorage;
@@ -61,7 +64,7 @@ class IStorage : public std::enable_shared_from_this<IStorage>
     , public ITableDeclaration
 {
 public:
-    /// The main name of the table type (for example, StorageMergeTree).
+    /// The main name of the table type (for example, StorageDeltaMerge).
     virtual std::string getName() const = 0;
 
     /** The name of the table.
@@ -142,7 +145,21 @@ public:
                                    size_t /*max_block_size*/,
                                    unsigned /*num_streams*/)
     {
-        throw Exception("Method read is not supported by storage " + getName(), ErrorCodes::NOT_IMPLEMENTED);
+        throw Exception("Method read(pull model) is not supported by storage " + getName(), ErrorCodes::NOT_IMPLEMENTED);
+    }
+
+    virtual void read(
+        PipelineExecutorStatus & /*exec_status*/,
+        PipelineExecGroupBuilder & /*group_builder*/,
+        const Names & /*column_names*/,
+        const SelectQueryInfo & /*query_info*/,
+        const Context & /*context*/,
+        size_t /*max_block_size*/,
+        unsigned /*num_streams*/)
+    {
+        throw Exception(
+            fmt::format("Method read(push model) is not supported by storage {}", getName()),
+            ErrorCodes::NOT_IMPLEMENTED);
     }
 
     /** Writes the data to a table.

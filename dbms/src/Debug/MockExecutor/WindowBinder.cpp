@@ -12,8 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <Debug/MockExecutor/AstToPB.h>
 #include <Debug/MockExecutor/ExecutorBinder.h>
+#include <Debug/MockExecutor/FuncSigMap.h>
 #include <Debug/MockExecutor/WindowBinder.h>
+#include <Parsers/ASTFunction.h>
+#include <tipb/expression.pb.h>
+
 
 namespace DB::mock
 {
@@ -68,6 +73,14 @@ bool WindowBinder::toTiPBExecutor(tipb::Executor * tipb_executor, int32_t collat
             ft->set_collate(first_arg_type.collate());
             ft->set_flen(first_arg_type.flen());
             ft->set_decimal(first_arg_type.decimal());
+            break;
+        }
+        case tipb::ExprType::FirstValue:
+        case tipb::ExprType::LastValue:
+        {
+            assert(window_expr->children_size() == 1);
+            const auto arg_type = window_expr->children(0).field_type();
+            (*ft) = arg_type;
             break;
         }
         default:
@@ -197,6 +210,12 @@ ExecutorBinderPtr compileWindow(ExecutorBinderPtr input, size_t & executor_index
                     assert(children_ci[0].tp == children_ci[2].tp);
                     ci = children_ci[0].hasNotNullFlag() ? children_ci[2] : children_ci[0];
                 }
+                break;
+            }
+            case tipb::ExprType::FirstValue:
+            case tipb::ExprType::LastValue:
+            {
+                ci = children_ci[0];
                 break;
             }
             default:

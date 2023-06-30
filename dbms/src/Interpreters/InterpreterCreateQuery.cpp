@@ -19,6 +19,7 @@
 #include <DataTypes/NestedUtils.h>
 #include <Databases/DatabaseFactory.h>
 #include <Databases/IDatabase.h>
+#include <Encryption/FileProvider.h>
 #include <Encryption/WriteBufferFromFileProvider.h>
 #include <IO/WriteHelpers.h>
 #include <Interpreters/Context.h>
@@ -57,6 +58,7 @@ extern const int TABLE_METADATA_ALREADY_EXISTS;
 extern const int UNKNOWN_DATABASE_ENGINE;
 extern const int DUPLICATE_COLUMN;
 extern const int READONLY;
+extern const int DDL_GUARD_IS_ACTIVE;
 } // namespace ErrorCodes
 
 namespace FailPoints
@@ -217,7 +219,7 @@ static ColumnsAndDefaults parseColumns(const ASTExpressionList & column_list_ast
             {
                 const auto & final_column_name = col_decl.name;
                 const auto tmp_column_name = final_column_name + "_tmp";
-                const auto data_type_ptr = columns.back().type.get();
+                const auto * const data_type_ptr = columns.back().type.get();
 
                 default_expr_list->children.emplace_back(setAlias(makeASTFunction("CAST", std::make_shared<ASTIdentifier>(tmp_column_name), std::make_shared<ASTLiteral>(Field(data_type_ptr->getName()))),
                                                                   final_column_name));
@@ -236,8 +238,8 @@ static ColumnsAndDefaults parseColumns(const ASTExpressionList & column_list_ast
 
         for (auto & column : defaulted_columns)
         {
-            const auto name_and_type_ptr = column.first;
-            const auto col_decl_ptr = column.second;
+            auto * const name_and_type_ptr = column.first;
+            auto * const col_decl_ptr = column.second;
 
             const auto & column_name = col_decl_ptr->name;
             const auto has_explicit_type = nullptr != col_decl_ptr->type;
@@ -307,8 +309,8 @@ ASTPtr InterpreterCreateQuery::formatColumns(const NamesAndTypesList & columns)
         column_declaration->name = column.name;
 
         StringPtr type_name = std::make_shared<String>(column.type->getName());
-        auto pos = type_name->data();
-        const auto end = pos + type_name->size();
+        auto * pos = type_name->data();
+        auto * const end = pos + type_name->size();
 
         ParserIdentifierWithOptionalParameters storage_p;
         column_declaration->type = parseQuery(storage_p, pos, end, "data type", 0);
@@ -331,8 +333,8 @@ ASTPtr InterpreterCreateQuery::formatColumns(const ColumnsDescription & columns)
         column_declaration->name = column.name;
 
         StringPtr type_name = std::make_shared<String>(column.type->getName());
-        auto pos = type_name->data();
-        const auto end = pos + type_name->size();
+        auto * pos = type_name->data();
+        auto * const end = pos + type_name->size();
 
         ParserIdentifierWithOptionalParameters storage_p;
         column_declaration->type = parseQuery(storage_p, pos, end, "data type", 0);
@@ -472,7 +474,7 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
     {
         // Table SQL definition is available even if the table is detached
         auto query = context.getCreateTableQuery(database_name, table_name);
-        auto & as_create = typeid_cast<const ASTCreateQuery &>(*query);
+        const auto & as_create = typeid_cast<const ASTCreateQuery &>(*query);
         create = as_create; // Copy the saved create query, but use ATTACH instead of CREATE
         create.attach = true;
     }
@@ -522,17 +524,52 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
               * Otherwise, concurrent queries for creating a table, if the table does not exist,
               *  can throw an exception, even if IF NOT EXISTS is specified.
               */
-            guard = context.getDDLGuardIfTableDoesntExist(
-                database_name,
-                table_name,
-                "Table " + database_name + "." + table_name + " is creating or attaching right now");
-
-            if (!guard)
+            try
             {
-                if (create.if_not_exists)
-                    return {};
+                guard = context.getDDLGuardIfTableDoesntExist(
+                    database_name,
+                    table_name,
+                    "Table " + database_name + "." + table_name + " is creating or attaching right now");
+
+                if (!guard)
+                {
+                    if (create.if_not_exists)
+                        return {};
+                    else
+                        throw Exception("Table " + database_name + "." + table_name + " already exists.", ErrorCodes::TABLE_ALREADY_EXISTS);
+                }
+            }
+            catch (Exception & e)
+            {
+                // Due to even if it throws this two error code, it can't ensure the table is completely created
+                // So we have to wait for the table created completely, then return to use the table.
+                // Thus, we choose to do a retry here to wait the table created completed.
+                if (e.code() == ErrorCodes::TABLE_ALREADY_EXISTS || e.code() == ErrorCodes::DDL_GUARD_IS_ACTIVE)
+                {
+                    LOG_WARNING(Logger::get("InterpreterCreateQuery"), "createTable failed with error code is {}, error info is {}, stack_info is {}", e.code(), e.displayText(), e.getStackTrace().toString());
+                    for (int i = 0; i < 20; i++) // retry for 400ms
+                    {
+                        if (context.isTableExist(database_name, table_name))
+                        {
+                            return {};
+                        }
+                        else
+                        {
+                            const int wait_useconds = 20000;
+                            LOG_ERROR(
+                                Logger::get("InterpreterCreateQuery"),
+                                "createTable failed but table not exist now, \nWe will sleep for {} ms and try again.",
+                                wait_useconds / 1000);
+                            usleep(wait_useconds); // sleep 20ms
+                        }
+                    }
+                    LOG_ERROR(Logger::get("InterpreterCreateQuery"), "still failed to createTable in InterpreterCreateQuery for retry 20 times");
+                    e.rethrow();
+                }
                 else
-                    throw Exception("Table " + database_name + "." + table_name + " already exists.", ErrorCodes::TABLE_ALREADY_EXISTS);
+                {
+                    e.rethrow();
+                }
             }
         }
         else if (context.tryGetExternalTable(table_name) && create.if_not_exists)
@@ -571,7 +608,7 @@ BlockIO InterpreterCreateQuery::createTable(ASTCreateQuery & create)
         return InterpreterInsertQuery(
                    insert,
                    create.is_temporary ? context.getSessionContext() : context,
-                   context.getSettingsRef().insert_allow_materialized_columns)
+                   false)
             .execute();
     }
 

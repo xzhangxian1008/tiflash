@@ -1,3 +1,5 @@
+set_property(DIRECTORY PROPERTY EXCLUDE_FROM_ALL 1)
+
 if (NOT MSVC)
     set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-old-style-cast")
 endif ()
@@ -126,6 +128,8 @@ set (ENABLE_TESTS ${_save})
 # -------
 add_subdirectory (tipb/cpp)
 
+add_subdirectory (etcd)
+
 if (USE_INTERNAL_TIFLASH_PROXY)
     add_subdirectory (tiflash-proxy-cmake)
 endif ()
@@ -175,3 +179,5 @@ if (ARCH_AARCH64 AND OS_LINUX)
 endif ()
 
 add_subdirectory(magic_enum)
+
+add_subdirectory(aws-cmake)

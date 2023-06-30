@@ -13,13 +13,16 @@
 // limitations under the License.
 
 #include <DataStreams/BlocksListBlockInputStream.h>
+#include <Interpreters/Context.h>
+#include <Storages/DeltaMerge/DeltaMergeStore.h>
 #include <Storages/DeltaMerge/SSTFilesToDTFilesOutputStream.h>
 #include <Storages/DeltaMerge/tests/DMTestEnv.h>
+#include <Storages/PathPool.h>
 #include <Storages/StorageDeltaMerge.h>
 #include <Storages/Transaction/TMTContext.h>
 #include <Storages/Transaction/tests/region_helper.h>
-#include <Storages/tests/TiFlashStorageTestBasic.h>
 #include <TestUtils/FunctionTestUtils.h>
+#include <TestUtils/TiFlashStorageTestBasic.h>
 #include <TestUtils/TiFlashTestBasic.h>
 
 #include <magic_enum.hpp>
@@ -46,7 +49,7 @@ public:
     void TearDown() override
     {
         storage->drop();
-        db_context->getTMTContext().getStorages().remove(/* table id */ 100);
+        db_context->getTMTContext().getStorages().remove(NullspaceID, /* table id */ 100);
     }
 
     void setupStorage()
@@ -111,7 +114,7 @@ try
         ASSERT_EQ(blocks.size(), 1);
         auto block = blocks[0];
         auto col = block.getByName(MutableSupport::tidb_pk_column_name);
-        ASSERT_COLUMN_EQ(col, createColumn<Int64>({-10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4}, "col"));
+        ASSERT_COLUMN_EQ(col, createColumn<Int64>({-10, -9, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4}));
     }
     {
         auto blocks = prepareBlocks(1, 14, 3);
@@ -119,27 +122,27 @@ try
         {
             auto block = blocks[0];
             auto col = block.getByName(MutableSupport::tidb_pk_column_name);
-            ASSERT_COLUMN_EQ(col, createColumn<Int64>({1, 2, 3}, "col"));
+            ASSERT_COLUMN_EQ(col, createColumn<Int64>({1, 2, 3}));
         }
         {
             auto block = blocks[1];
             auto col = block.getByName(MutableSupport::tidb_pk_column_name);
-            ASSERT_COLUMN_EQ(col, createColumn<Int64>({4, 5, 6}, "col"));
+            ASSERT_COLUMN_EQ(col, createColumn<Int64>({4, 5, 6}));
         }
         {
             auto block = blocks[2];
             auto col = block.getByName(MutableSupport::tidb_pk_column_name);
-            ASSERT_COLUMN_EQ(col, createColumn<Int64>({7, 8, 9}, "col"));
+            ASSERT_COLUMN_EQ(col, createColumn<Int64>({7, 8, 9}));
         }
         {
             auto block = blocks[3];
             auto col = block.getByName(MutableSupport::tidb_pk_column_name);
-            ASSERT_COLUMN_EQ(col, createColumn<Int64>({10, 11, 12}, "col"));
+            ASSERT_COLUMN_EQ(col, createColumn<Int64>({10, 11, 12}));
         }
         {
             auto block = blocks[4];
             auto col = block.getByName(MutableSupport::tidb_pk_column_name);
-            ASSERT_COLUMN_EQ(col, createColumn<Int64>({13}, "col"));
+            ASSERT_COLUMN_EQ(col, createColumn<Int64>({13}));
         }
     }
     {
@@ -148,17 +151,17 @@ try
         {
             auto block = blocks[0];
             auto col = block.getByName(MutableSupport::tidb_pk_column_name);
-            ASSERT_COLUMN_EQ(col, createColumn<Int64>({1}, "col"));
+            ASSERT_COLUMN_EQ(col, createColumn<Int64>({1}));
         }
         {
             auto block = blocks[1];
             auto col = block.getByName(MutableSupport::tidb_pk_column_name);
-            ASSERT_COLUMN_EQ(col, createColumn<Int64>({2}, "col"));
+            ASSERT_COLUMN_EQ(col, createColumn<Int64>({2}));
         }
         {
             auto block = blocks[2];
             auto col = block.getByName(MutableSupport::tidb_pk_column_name);
-            ASSERT_COLUMN_EQ(col, createColumn<Int64>({3}, "col"));
+            ASSERT_COLUMN_EQ(col, createColumn<Int64>({3}));
         }
     }
 }
@@ -177,7 +180,6 @@ try
         mock_stream,
         storage,
         schema_snapshot,
-        TiDB::SnapshotApplyMethod::DTFile_Directory,
         FileConvertJobType::ApplySnapshot,
         /* split_after_rows */ 0,
         /* split_after_size */ 0,
@@ -205,7 +207,6 @@ try
         mock_stream,
         storage,
         schema_snapshot,
-        TiDB::SnapshotApplyMethod::DTFile_Directory,
         FileConvertJobType::ApplySnapshot,
         /* split_after_rows */ 0,
         /* split_after_size */ 0,
@@ -235,7 +236,6 @@ try
         mock_stream,
         storage,
         schema_snapshot,
-        TiDB::SnapshotApplyMethod::DTFile_Directory,
         FileConvertJobType::ApplySnapshot,
         /* split_after_rows */ 1,
         /* split_after_size */ 1,
@@ -266,7 +266,6 @@ try
         mock_stream,
         storage,
         schema_snapshot,
-        TiDB::SnapshotApplyMethod::DTFile_Directory,
         FileConvertJobType::ApplySnapshot,
         /* split_after_rows */ 10,
         /* split_after_size */ 0,
@@ -303,7 +302,6 @@ try
         mock_stream,
         storage,
         schema_snapshot,
-        TiDB::SnapshotApplyMethod::DTFile_Directory,
         FileConvertJobType::ApplySnapshot,
         /* split_after_rows */ 10,
         /* split_after_size */ 0,
@@ -336,7 +334,6 @@ try
         mock_stream,
         storage,
         schema_snapshot,
-        TiDB::SnapshotApplyMethod::DTFile_Directory,
         FileConvertJobType::ApplySnapshot,
         /* split_after_rows */ 10000,
         /* split_after_size */ 0,
@@ -370,7 +367,6 @@ try
         mock_stream,
         storage,
         schema_snapshot,
-        TiDB::SnapshotApplyMethod::DTFile_Directory,
         FileConvertJobType::ApplySnapshot,
         /* split_after_rows */ 20,
         /* split_after_size */ 0,
@@ -410,7 +406,6 @@ try
         mock_stream,
         storage,
         schema_snapshot,
-        TiDB::SnapshotApplyMethod::DTFile_Directory,
         FileConvertJobType::ApplySnapshot,
         /* split_after_rows */ 20,
         /* split_after_size */ 0,
@@ -427,6 +422,47 @@ try
 }
 CATCH
 
+TEST_F(SSTFilesToDTFilesOutputStreamTest, Cancel)
+try
+{
+    auto table_lock = storage->lockStructureForShare("foo_query_id");
+    auto [schema_snapshot, unused] = storage->getSchemaSnapshotAndBlockForDecoding(table_lock, false);
+
+    auto mock_stream = makeMockChild(prepareBlocks(50, 100, /*block_size=*/1));
+    auto stream = std::make_shared<DM::SSTFilesToDTFilesOutputStream<DM::MockSSTFilesToDTFilesOutputStreamChildPtr>>(
+        /* log_prefix */ "",
+        mock_stream,
+        storage,
+        schema_snapshot,
+        FileConvertJobType::ApplySnapshot,
+        /* split_after_rows */ 10,
+        /* split_after_size */ 0,
+        *db_context);
+
+    stream->writePrefix();
+    stream->write();
+    stream->writeSuffix();
+    auto files = stream->outputFiles();
+    ASSERT_EQ(5, files.size());
+
+    auto delegator = storage->getAndMaybeInitStore()->path_pool->getStableDiskDelegator();
+    std::unordered_map<UInt64, String> file_id_to_path;
+    for (const auto & file : files)
+    {
+        auto parent_path = delegator.getDTFilePath(file.id);
+        auto file_path = DM::DMFile::getPathByStatus(parent_path, file.id, DM::DMFile::Status::READABLE);
+        file_id_to_path.emplace(file.id, file_path);
+        ASSERT_TRUE(Poco::File(file_path).exists());
+    }
+    stream->cancel(); // remove all data
+    for (const auto & file : files)
+    {
+        ASSERT_TRUE(delegator.getDTFilePath(file.id, /*throw_on_not_exists*/ false).empty());
+        auto file_path = file_id_to_path[file.id];
+        ASSERT_FALSE(Poco::File(file_path).exists());
+    }
+}
+CATCH
 
 } // namespace tests
 } // namespace DM

@@ -73,6 +73,8 @@ public:
 
     std::pair<Int64, Int64> getIntMinMax(size_t pack_index);
 
+    std::pair<std::string, std::string> getIntMinMaxOrNull(size_t pack_index);
+
     std::pair<StringRef, StringRef> getStringMinMax(size_t pack_index);
 
     std::pair<UInt64, UInt64> getUInt64MinMax(size_t pack_index);
@@ -101,8 +103,8 @@ private:
     using Base = LRUCache<String, MinMaxIndex, std::hash<String>, MinMaxIndexWeightFunction>;
 
 public:
-    MinMaxIndexCache(size_t max_size_in_bytes, const Delay & expiration_delay)
-        : Base(max_size_in_bytes, expiration_delay)
+    explicit MinMaxIndexCache(size_t max_size_in_bytes)
+        : Base(max_size_in_bytes)
     {}
 
     template <typename LoadFunc>

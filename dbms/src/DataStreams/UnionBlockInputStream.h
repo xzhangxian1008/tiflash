@@ -90,15 +90,19 @@ public:
 private:
     using Self = UnionBlockInputStream<mode, ignore_block>;
     static constexpr auto NAME = "Union";
+    using Payload = UnionBlockInputStreamImpl::OutputData<mode>;
 
 public:
     UnionBlockInputStream(
         BlockInputStreams inputs,
         BlockInputStreams additional_inputs_at_end,
         size_t max_threads,
+        Int64 max_buffered_bytes,
         const String & req_id,
         ExceptionCallback exception_callback_ = ExceptionCallback())
-        : output_queue(std::min(std::max(inputs.size(), additional_inputs_at_end.size()), max_threads) * 5) // reduce contention
+        : output_queue(
+            CapacityLimits(std::min(std::max(inputs.size(), additional_inputs_at_end.size()), max_threads) * 5, max_buffered_bytes),
+            [](const Payload & element) { return element.block.allocatedBytes(); }) // reduce contention
         , log(Logger::get(req_id))
         , handler(*this)
         , processor(inputs, additional_inputs_at_end, max_threads, handler, log)
@@ -255,6 +259,20 @@ protected:
             children[i]->readSuffix();
     }
 
+    uint64_t collectCPUTimeNsImpl(bool /*is_thread_runner*/) override
+    {
+        // `UnionBlockInputStream` does not count its own execute time,
+        // whether `UnionBlockInputStream` is `thread-runner` or not,
+        // because `UnionBlockInputStream` basically does not use cpu, only `condition_cv.wait`.
+        uint64_t cpu_time_ns = 0;
+        forEachChild([&](IBlockInputStream & child) {
+            // Each of `UnionBlockInputStream`'s children is a thread-runner.
+            cpu_time_ns += child.collectCPUTimeNs(true);
+            return false;
+        });
+        return cpu_time_ns;
+    }
+
 private:
     BlockExtraInfo doGetBlockExtraInfo() const
     {
@@ -267,7 +285,6 @@ private:
     }
 
 private:
-    using Payload = UnionBlockInputStreamImpl::OutputData<mode>;
     using OutputQueue = MPMCQueue<Payload>;
 
 private:

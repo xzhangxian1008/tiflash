@@ -16,7 +16,10 @@
 #include <DataStreams/IBlockOutputStream.h>
 #include <DataStreams/IProfilingBlockInputStream.h>
 #include <DataStreams/MergingAggregatedMemoryEfficientBlockInputStream.h>
+#include <DataStreams/MergingAndConvertingBlockInputStream.h>
+#include <DataStreams/NullBlockInputStream.h>
 #include <DataStreams/ParallelAggregatingBlockInputStream.h>
+#include <DataStreams/UnionBlockInputStream.h>
 
 namespace DB
 {
@@ -24,17 +27,17 @@ ParallelAggregatingBlockInputStream::ParallelAggregatingBlockInputStream(
     const BlockInputStreams & inputs,
     const BlockInputStreams & additional_inputs_at_end,
     const Aggregator::Params & params_,
-    const FileProviderPtr & file_provider_,
     bool final_,
     size_t max_threads_,
+    Int64 max_buffered_bytes_,
     size_t temporary_data_merge_threads_,
     const String & req_id)
     : log(Logger::get(req_id))
     , params(params_)
     , aggregator(params, req_id)
-    , file_provider(file_provider_)
     , final(final_)
     , max_threads(std::min(inputs.size(), max_threads_))
+    , max_buffered_bytes(max_buffered_bytes_)
     , temporary_data_merge_threads(temporary_data_merge_threads_)
     , keys_size(params.keys_size)
     , aggregates_size(params.aggregates_size)
@@ -79,11 +82,30 @@ Block ParallelAggregatingBlockInputStream::readImpl()
         if (isCancelledOrThrowIfKilled())
             return {};
 
-        if (!aggregator.hasTemporaryFiles())
+        if (!aggregator.hasSpilledData())
         {
             /** If all partially-aggregated data is in RAM, then merge them in parallel, also in RAM.
                 */
-            impl = aggregator.mergeAndConvertToBlocks(many_data, final, max_threads);
+            auto merging_buckets = aggregator.mergeAndConvertToBlocks(many_data, final, max_threads);
+            if (!merging_buckets)
+            {
+                impl = std::make_unique<NullBlockInputStream>(aggregator.getHeader(final));
+            }
+            else
+            {
+                RUNTIME_CHECK(merging_buckets->getConcurrency() > 0);
+                if (merging_buckets->getConcurrency() > 1)
+                {
+                    BlockInputStreams merging_streams;
+                    for (size_t i = 0; i < merging_buckets->getConcurrency(); ++i)
+                        merging_streams.push_back(std::make_shared<MergingAndConvertingBlockInputStream>(merging_buckets, i, log->identifier()));
+                    impl = std::make_unique<UnionBlockInputStream<>>(merging_streams, BlockInputStreams{}, max_threads, max_buffered_bytes, log->identifier());
+                }
+                else
+                {
+                    impl = std::make_unique<MergingAndConvertingBlockInputStream>(merging_buckets, 0, log->identifier());
+                }
+            }
         }
         else
         {
@@ -91,21 +113,9 @@ Block ParallelAggregatingBlockInputStream::readImpl()
                 *  then read and merge them, spending the minimum amount of memory.
                 */
 
-            const auto & files = aggregator.getTemporaryFiles();
-            BlockInputStreams input_streams;
-            for (const auto & file : files.files)
-            {
-                temporary_inputs.emplace_back(std::make_unique<TemporaryFileStream>(file->path(), file_provider));
-                input_streams.emplace_back(temporary_inputs.back()->block_in);
-            }
-
-            LOG_TRACE(
-                log,
-                "Will merge {} temporary files of size {:.2f} MiB compressed, {:.2f} MiB uncompressed.",
-                files.files.size(),
-                (files.sum_size_compressed / 1048576.0),
-                (files.sum_size_uncompressed / 1048576.0));
-
+            aggregator.finishSpill();
+            LOG_INFO(log, "Begin restore data from disk for aggregation.");
+            BlockInputStreams input_streams = aggregator.restoreSpilledData();
             impl = std::make_unique<MergingAggregatedMemoryEfficientBlockInputStream>(
                 input_streams,
                 params,
@@ -118,23 +128,22 @@ Block ParallelAggregatingBlockInputStream::readImpl()
         executed = true;
     }
 
-    Block res;
     if (isCancelledOrThrowIfKilled() || !impl)
-        return res;
+        return {};
 
     return impl->read();
 }
 
 void ParallelAggregatingBlockInputStream::Handler::onBlock(Block & block, size_t thread_num)
 {
+    auto & data = *parent.many_data[thread_num];
     parent.aggregator.executeOnBlock(
         block,
-        *parent.many_data[thread_num],
-        parent.file_provider,
+        data,
         parent.threads_data[thread_num].key_columns,
-        parent.threads_data[thread_num].aggregate_columns,
-        parent.threads_data[thread_num].local_delta_memory,
-        parent.no_more_keys);
+        parent.threads_data[thread_num].aggregate_columns);
+    if (data.need_spill)
+        parent.aggregator.spill(data);
 
     parent.threads_data[thread_num].src_rows += block.rows();
     parent.threads_data[thread_num].src_bytes += block.bytes();
@@ -142,32 +151,25 @@ void ParallelAggregatingBlockInputStream::Handler::onBlock(Block & block, size_t
 
 void ParallelAggregatingBlockInputStream::Handler::onFinishThread(size_t thread_num)
 {
-    if (!parent.isCancelled() && parent.aggregator.hasTemporaryFiles())
+    if (!parent.isCancelled() && parent.aggregator.hasSpilledData())
     {
         /// Flush data in the RAM to disk. So it's easier to unite them later.
         auto & data = *parent.many_data[thread_num];
-
-        if (data.isConvertibleToTwoLevel())
-            data.convertToTwoLevel();
-
-        if (!data.empty())
-            parent.aggregator.writeToTemporaryFile(data, parent.file_provider);
+        if (data.tryMarkNeedSpill())
+            parent.aggregator.spill(data);
     }
 }
 
 void ParallelAggregatingBlockInputStream::Handler::onFinish()
 {
-    if (!parent.isCancelled() && parent.aggregator.hasTemporaryFiles())
+    if (!parent.isCancelled() && parent.aggregator.hasSpilledData())
     {
         /// It may happen that some data has not yet been flushed,
         ///  because at the time of `onFinishThread` call, no data has been flushed to disk, and then some were.
         for (auto & data : parent.many_data)
         {
-            if (data->isConvertibleToTwoLevel())
-                data->convertToTwoLevel();
-
-            if (!data->empty())
-                parent.aggregator.writeToTemporaryFile(*data, parent.file_provider);
+            if (data->tryMarkNeedSpill())
+                parent.aggregator.spill(*data);
         }
     }
 }
@@ -191,6 +193,7 @@ void ParallelAggregatingBlockInputStream::execute()
 
     for (size_t i = 0; i < max_threads; ++i)
         threads_data.emplace_back(keys_size, aggregates_size);
+    aggregator.initThresholdByAggregatedDataVariantsSize(many_data.size());
 
     LOG_TRACE(log, "Aggregating");
 
@@ -240,19 +243,32 @@ void ParallelAggregatingBlockInputStream::execute()
     /// If there was no data, and we aggregate without keys, we must return single row with the result of empty aggregation.
     /// To do this, we pass a block with zero rows to aggregate.
     if (total_src_rows == 0 && params.keys_size == 0 && !params.empty_result_for_aggregation_by_empty_set)
+    {
+        auto & data = *many_data[0];
         aggregator.executeOnBlock(
             children.at(0)->getHeader(),
-            *many_data[0],
-            file_provider,
+            data,
             threads_data[0].key_columns,
-            threads_data[0].aggregate_columns,
-            threads_data[0].local_delta_memory,
-            no_more_keys);
+            threads_data[0].aggregate_columns);
+        if (data.need_spill)
+            aggregator.spill(data);
+    }
 }
 
 void ParallelAggregatingBlockInputStream::appendInfo(FmtBuffer & buffer) const
 {
     buffer.fmtAppend(", max_threads: {}, final: {}", max_threads, final ? "true" : "false");
+}
+
+uint64_t ParallelAggregatingBlockInputStream::collectCPUTimeNsImpl(bool is_thread_runner)
+{
+    uint64_t cpu_time_ns = impl ? impl->collectCPUTimeNs(is_thread_runner) : 0;
+    // Each of ParallelAggregatingBlockInputStream's children is a thread-runner.
+    forEachChild([&](IBlockInputStream & child) {
+        cpu_time_ns += child.collectCPUTimeNs(true);
+        return false;
+    });
+    return cpu_time_ns;
 }
 
 } // namespace DB

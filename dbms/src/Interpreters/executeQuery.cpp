@@ -147,7 +147,7 @@ void onExceptionBeforeStart(const String & query, Context & context, time_t curr
 }
 
 std::tuple<ASTPtr, BlockIO> executeQueryImpl(
-    IQuerySource & query_src,
+    SQLQuerySource & query_src,
     Context & context,
     bool internal,
     QueryProcessingStage::Enum stage)
@@ -205,7 +205,7 @@ std::tuple<ASTPtr, BlockIO> executeQueryImpl(
         ProcessList::EntryPtr process_list_entry;
         if (!internal && nullptr == typeid_cast<const ASTShowProcesslistQuery *>(&*ast))
         {
-            process_list_entry = setProcessListElement(context, query, ast.get());
+            process_list_entry = setProcessListElement(context, query, ast.get(), false);
         }
 
         FAIL_POINT_TRIGGER_EXCEPTION(FailPoints::random_interpreter_failpoint);
@@ -221,7 +221,7 @@ std::tuple<ASTPtr, BlockIO> executeQueryImpl(
 
         if (res.in)
         {
-            prepareForInputStream(context, stage, res.in);
+            prepareForInputStream(context, res.in);
         }
 
         if (res.out)
@@ -388,7 +388,6 @@ void logQuery(const String & query, const Context & context, const LoggerPtr & l
 
 void prepareForInputStream(
     Context & context,
-    QueryProcessingStage::Enum stage,
     const BlockInputStreamPtr & in)
 {
     assert(in);
@@ -396,33 +395,24 @@ void prepareForInputStream(
     {
         stream->setProgressCallback(context.getProgressCallback());
         stream->setProcessListElement(context.getProcessListElement());
-
-        /// Limits on the result, the quota on the result, and also callback for progress.
-        /// Limits apply only to the final result.
-        if (stage == QueryProcessingStage::Complete)
-        {
-            IProfilingBlockInputStream::LocalLimits limits;
-            limits.mode = IProfilingBlockInputStream::LIMITS_CURRENT;
-            const auto & settings = context.getSettingsRef();
-            limits.size_limits = SizeLimits(settings.max_result_rows, settings.max_result_bytes, settings.result_overflow_mode);
-
-            stream->setLimits(limits);
-            stream->setQuota(context.getQuota());
-        }
     }
 }
 
 std::shared_ptr<ProcessListEntry> setProcessListElement(
     Context & context,
     const String & query,
-    const IAST * ast)
+    const IAST * ast,
+    bool is_dag_task)
 {
     assert(ast);
+    auto total_memory = context.getServerInfo().has_value() ? context.getServerInfo()->memory_info.capacity : 0;
     auto process_list_entry = context.getProcessList().insert(
         query,
         ast,
         context.getClientInfo(),
-        context.getSettingsRef());
+        context.getSettingsRef(),
+        total_memory,
+        is_dag_task);
     context.setProcessListElement(&process_list_entry->get());
     return process_list_entry;
 }
@@ -436,7 +426,7 @@ void logQueryPipeline(const LoggerPtr & logger, const BlockInputStreamPtr & in)
         in->dumpTree(log_buffer);
         return log_buffer.toString();
     };
-    LOG_DEBUG(logger, pipeline_log_str());
+    LOG_INFO(logger, pipeline_log_str());
 }
 
 BlockIO executeQuery(

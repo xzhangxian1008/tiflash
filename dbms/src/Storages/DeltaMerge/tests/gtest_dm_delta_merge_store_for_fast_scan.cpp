@@ -85,6 +85,8 @@ TEST_P(DeltaMergeStoreRWTest, TestFastScanWithOnlyInsertWithoutRangeFilter)
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -169,6 +171,8 @@ TEST_P(DeltaMergeStoreRWTest, TestFastScanWithOnlyInsertWithRangeFilter)
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -244,6 +248,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -365,6 +371,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -471,6 +479,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -580,6 +590,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -620,13 +632,11 @@ try
         {
             auto dm_context = store->newDMContext(*db_context, db_context->getSettingsRef());
             auto [range1, file_ids1] = genDMFile(*dm_context, block1);
+            store->ingestFiles(dm_context, range1, {file_ids1}, false);
             auto [range2, file_ids2] = genDMFile(*dm_context, block2);
+            store->ingestFiles(dm_context, range2, {file_ids2}, false);
             auto [range3, file_ids3] = genDMFile(*dm_context, block3);
-            auto range = range1.merge(range2).merge(range3);
-            auto file_ids = file_ids1;
-            file_ids.insert(file_ids.cend(), file_ids2.begin(), file_ids2.end());
-            file_ids.insert(file_ids.cend(), file_ids3.begin(), file_ids3.end());
-            store->ingestFiles(dm_context, range, file_ids, false);
+            store->ingestFiles(dm_context, range3, {file_ids3}, false);
             break;
         }
         case TestMode::V2_Mix:
@@ -635,11 +645,9 @@ try
 
             auto dm_context = store->newDMContext(*db_context, db_context->getSettingsRef());
             auto [range1, file_ids1] = genDMFile(*dm_context, block1);
+            store->ingestFiles(dm_context, range1, {file_ids1}, false);
             auto [range3, file_ids3] = genDMFile(*dm_context, block3);
-            auto range = range1.merge(range3);
-            auto file_ids = file_ids1;
-            file_ids.insert(file_ids.cend(), file_ids3.begin(), file_ids3.end());
-            store->ingestFiles(dm_context, range, file_ids, false);
+            store->ingestFiles(dm_context, range3, {file_ids3}, false);
             break;
         }
         }
@@ -659,6 +667,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -806,6 +816,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -832,6 +844,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -878,6 +892,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -903,6 +919,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order = */ false,
                                              /* is_fast_scan= */ true,
@@ -963,6 +981,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -1004,13 +1024,11 @@ try
         {
             auto dm_context = store->newDMContext(*db_context, db_context->getSettingsRef());
             auto [range1, file_ids1] = genDMFile(*dm_context, block1);
+            store->ingestFiles(dm_context, range1, {file_ids1}, false);
             auto [range2, file_ids2] = genDMFile(*dm_context, block2);
+            store->ingestFiles(dm_context, range2, {file_ids2}, false);
             auto [range3, file_ids3] = genDMFile(*dm_context, block3);
-            auto range = range1.merge(range2).merge(range3);
-            auto file_ids = file_ids1;
-            file_ids.insert(file_ids.cend(), file_ids2.begin(), file_ids2.end());
-            file_ids.insert(file_ids.cend(), file_ids3.begin(), file_ids3.end());
-            store->ingestFiles(dm_context, range, file_ids, false);
+            store->ingestFiles(dm_context, range3, {file_ids3}, false);
             break;
         }
         case TestMode::V2_Mix:
@@ -1019,11 +1037,9 @@ try
 
             auto dm_context = store->newDMContext(*db_context, db_context->getSettingsRef());
             auto [range1, file_ids1] = genDMFile(*dm_context, block1);
+            store->ingestFiles(dm_context, range1, {file_ids1}, false);
             auto [range3, file_ids3] = genDMFile(*dm_context, block3);
-            auto range = range1.merge(range3);
-            auto file_ids = file_ids1;
-            file_ids.insert(file_ids.cend(), file_ids3.begin(), file_ids3.end());
-            store->ingestFiles(dm_context, range, file_ids, false);
+            store->ingestFiles(dm_context, range3, {file_ids3}, false);
             break;
         }
         }
@@ -1051,6 +1067,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -1131,11 +1149,14 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ static_cast<UInt64>(1),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ false,
                                              /* expected_block_size= */ 1024)[0];
-        ASSERT_INPUTSTREAM_COLS_UR(
+        // Data is not guaranteed to be returned in order.
+        ASSERT_UNORDERED_INPUTSTREAM_COLS_UR(
             in,
             Strings({DMTestEnv::pk_name}),
             createColumns({createColumn<Int64>(createNumbers<Int64>(num_write_rows / 2, 2 * num_write_rows))}));
@@ -1183,6 +1204,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,
@@ -1227,6 +1250,8 @@ try
                                              /* num_streams= */ 1,
                                              /* max_version= */ std::numeric_limits<UInt64>::max(),
                                              EMPTY_FILTER,
+                                             std::vector<RuntimeFilterPtr>{},
+                                             0,
                                              TRACING_NAME,
                                              /* keep_order= */ false,
                                              /* is_fast_scan= */ true,

@@ -377,6 +377,60 @@ ColumnWithTypeAndName createDateTimeColumnConst(size_t size, const std::optional
     return {std::move(col), data_type_ptr, "datetime"};
 }
 
+template <bool is_nullable = true>
+ColumnWithTypeAndName createDurationColumn(std::initializer_list<std::optional<MyDuration>> init, int fraction)
+{
+    DataTypePtr data_type_ptr = std::make_shared<DataTypeMyDuration>(fraction);
+    if constexpr (is_nullable)
+    {
+        data_type_ptr = makeNullable(data_type_ptr);
+    }
+    auto col = data_type_ptr->createColumn();
+    for (const auto & dt : init)
+    {
+        if (dt.has_value())
+            col->insert(Field(dt->nanoSecond()));
+        else
+        {
+            if constexpr (is_nullable)
+            {
+                col->insert(Null());
+            }
+            else
+            {
+                throw Exception("Null value for not nullable DataTypeMyDuration");
+            }
+        }
+    }
+    return {std::move(col), data_type_ptr, "duration"};
+}
+
+template <bool is_nullable = true>
+ColumnWithTypeAndName createDurationColumnConst(size_t size, const std::optional<MyDuration> & duration, int fraction)
+{
+    DataTypePtr data_type_ptr = std::make_shared<DataTypeMyDuration>(fraction);
+    if constexpr (is_nullable)
+    {
+        data_type_ptr = makeNullable(data_type_ptr);
+    }
+
+    ColumnPtr col;
+    if (duration.has_value())
+        col = data_type_ptr->createColumnConst(size, Field(duration->nanoSecond()));
+    else
+    {
+        if constexpr (is_nullable)
+        {
+            col = data_type_ptr->createColumnConst(size, Field(Null()));
+        }
+        else
+        {
+            throw Exception("Null value for not nullable DataTypeMyDuration");
+        }
+    }
+    return {std::move(col), data_type_ptr, "duration"};
+}
+
 // parse a string into decimal field.
 template <typename T>
 typename TypeTraits<T>::FieldType parseDecimal(
@@ -532,12 +586,14 @@ ColumnsWithTypeAndName createColumns(const ColumnsWithTypeAndName & cols);
 ::testing::AssertionResult columnEqual(
     const ColumnPtr & expected,
     const ColumnPtr & actual,
+    const ICollator * collator = nullptr,
     bool is_floating_point = false);
 
 // ignore name
 ::testing::AssertionResult columnEqual(
     const ColumnWithTypeAndName & expected,
-    const ColumnWithTypeAndName & actual);
+    const ColumnWithTypeAndName & actual,
+    const ICollator * collator = nullptr);
 
 ::testing::AssertionResult blockEqual(
     const Block & expected,
@@ -554,6 +610,7 @@ ColumnWithTypeAndName executeFunction(
     const String & func_name,
     const ColumnsWithTypeAndName & columns,
     const TiDB::TiDBCollatorPtr & collator = nullptr,
+    const String & val = "",
     bool raw_function_test = false);
 
 ColumnWithTypeAndName executeFunction(
@@ -562,6 +619,7 @@ ColumnWithTypeAndName executeFunction(
     const ColumnNumbers & argument_column_numbers,
     const ColumnsWithTypeAndName & columns,
     const TiDB::TiDBCollatorPtr & collator = nullptr,
+    const String & val = "",
     bool raw_function_test = false);
 
 template <typename... Args>
@@ -707,6 +765,12 @@ ColumnWithTypeAndName toVec(String name, const std::vector<typename TypeTraits<T
 ColumnWithTypeAndName toDatetimeVec(String name, const std::vector<String> & v, int fsp);
 
 ColumnWithTypeAndName toNullableDatetimeVec(String name, const std::vector<String> & v, int fsp);
+
+struct FuncMetaData
+{
+    String val; // This is for the val field of tipb::expr
+};
+
 class FunctionTest : public ::testing::Test
 {
 protected:
@@ -727,23 +791,16 @@ public:
             // Maybe another test has already registered, ignore exception here.
         }
     }
-    FunctionTest()
-        : context(TiFlashTestEnv::getContext())
-    {}
-    virtual void initializeDAGContext()
-    {
-        dag_context_ptr = std::make_unique<DAGContext>(1024);
-        context.setDAGContext(dag_context_ptr.get());
-    }
+
+    FunctionTest();
+
+    virtual void initializeDAGContext();
 
     ColumnWithTypeAndName executeFunction(
         const String & func_name,
         const ColumnsWithTypeAndName & columns,
         const TiDB::TiDBCollatorPtr & collator = nullptr,
-        bool raw_function_test = false)
-    {
-        return DB::tests::executeFunction(context, func_name, columns, collator, raw_function_test);
-    }
+        bool raw_function_test = false);
 
     template <typename... Args>
     ColumnWithTypeAndName executeFunction(const String & func_name, const ColumnWithTypeAndName & first_column, const Args &... columns)
@@ -757,10 +814,7 @@ public:
         const ColumnNumbers & argument_column_numbers,
         const ColumnsWithTypeAndName & columns,
         const TiDB::TiDBCollatorPtr & collator = nullptr,
-        bool raw_function_test = false)
-    {
-        return DB::tests::executeFunction(context, func_name, argument_column_numbers, columns, collator, raw_function_test);
-    }
+        bool raw_function_test = false);
 
     template <typename... Args>
     ColumnWithTypeAndName executeFunction(const String & func_name, const ColumnNumbers & argument_column_numbers, const ColumnWithTypeAndName & first_column, const Args &... columns)
@@ -769,6 +823,19 @@ public:
         return executeFunction(func_name, argument_column_numbers, vec);
     }
 
+    ColumnWithTypeAndName executeFunctionWithMetaData(
+        const String & func_name,
+        const ColumnsWithTypeAndName & columns,
+        const FuncMetaData & meta,
+        const TiDB::TiDBCollatorPtr & collator = nullptr);
+
+    ColumnWithTypeAndName executeFunctionWithMetaData(
+        const String & func_name,
+        const ColumnNumbers & argument_column_numbers,
+        const ColumnsWithTypeAndName & columns,
+        const FuncMetaData & meta,
+        const TiDB::TiDBCollatorPtr & collator = nullptr);
+
     DAGContext & getDAGContext()
     {
         RUNTIME_ASSERT(dag_context_ptr != nullptr);
@@ -776,16 +843,26 @@ public:
     }
 
 protected:
-    Context context;
+    ContextPtr context;
     std::unique_ptr<DAGContext> dag_context_ptr;
 };
 
 #define ASSERT_COLUMN_EQ(expected, actual) ASSERT_TRUE(DB::tests::columnEqual((expected), (actual)))
-#define ASSERT_BLOCK_EQ(expected, actual) DB::tests::blockEqual((expected), (actual))
+#define ASSERT_BLOCK_EQ(expected, actual) ASSERT_TRUE(DB::tests::blockEqual((expected), (actual)))
 
 /// restrictly checking columns equality, both data set and each row's offset should be the same
 #define ASSERT_COLUMNS_EQ_R(expected, actual) ASSERT_TRUE(DB::tests::columnsEqual((expected), (actual), true))
 /// unrestrictly checking columns equality, only checking data set equality
 #define ASSERT_COLUMNS_EQ_UR(expected, actual) ASSERT_TRUE(DB::tests::columnsEqual((expected), (actual), false))
+
+/// Check the profile event change after the body.
+#define ASSERT_PROFILE_EVENT(event, diff_expr, ...)                          \
+    do                                                                       \
+    {                                                                        \
+        auto profile_event_count = ProfileEvents::get(event);                \
+        {__VA_ARGS__};                                                       \
+        ASSERT_EQ(profile_event_count diff_expr, ProfileEvents::get(event)); \
+    } while (false);
+
 } // namespace tests
 } // namespace DB

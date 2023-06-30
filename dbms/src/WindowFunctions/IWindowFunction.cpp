@@ -55,13 +55,13 @@ struct WindowFunctionRank final : public IWindowFunction
     }
 
     void windowInsertResultInto(
-        WindowBlockInputStreamPtr stream,
+        WindowTransformAction & action,
         size_t function_index,
         const ColumnNumbers &) override
     {
-        IColumn & to = *stream->outputAt(stream->current_row)[function_index];
+        IColumn & to = *action.outputAt(action.current_row)[function_index];
         assert_cast<ColumnInt64 &>(to).getData().push_back(
-            stream->peer_group_start_row_number);
+            action.peer_group_start_row_number);
     }
 };
 
@@ -89,13 +89,13 @@ struct WindowFunctionDenseRank final : public IWindowFunction
     }
 
     void windowInsertResultInto(
-        WindowBlockInputStreamPtr stream,
+        WindowTransformAction & action,
         size_t function_index,
         const ColumnNumbers &) override
     {
-        IColumn & to = *stream->outputAt(stream->current_row)[function_index];
+        IColumn & to = *action.outputAt(action.current_row)[function_index];
         assert_cast<ColumnInt64 &>(to).getData().push_back(
-            stream->peer_group_number);
+            action.peer_group_number);
     }
 };
 
@@ -123,14 +123,94 @@ struct WindowFunctionRowNumber final : public IWindowFunction
     }
 
     void windowInsertResultInto(
-        WindowBlockInputStreamPtr stream,
+        WindowTransformAction & action,
         size_t function_index,
         const ColumnNumbers &) override
     {
-        IColumn & to = *stream->outputAt(stream->current_row)[function_index];
+        IColumn & to = *action.outputAt(action.current_row)[function_index];
         assert_cast<ColumnInt64 &>(to).getData().push_back(
-            stream->current_row_number);
+            action.current_row_number);
     }
+};
+
+struct WindowFunctionFirstValue final : public IWindowFunction
+{
+public:
+    static constexpr auto name = "first_value";
+
+    explicit WindowFunctionFirstValue(const DataTypes & argument_types_)
+        : IWindowFunction(argument_types_)
+    {
+        RUNTIME_CHECK(argument_types_.size() == 1);
+        return_type = argument_types_[0];
+    }
+
+    String getName() const override
+    {
+        return name;
+    }
+
+    DataTypePtr getReturnType() const override
+    {
+        return return_type;
+    }
+
+    void windowInsertResultInto(
+        WindowTransformAction & action,
+        size_t function_index,
+        const ColumnNumbers & arguments) override
+    {
+        assert(action.frame_started);
+        IColumn & to = *action.blockAt(action.current_row).output_columns[function_index];
+        const auto & value_column = *action.inputAt(action.frame_start)[arguments[0]];
+        const auto & value_field = value_column[action.frame_start.row];
+        to.insert(value_field);
+    }
+
+private:
+    DataTypePtr return_type;
+};
+
+struct WindowFunctionLastValue final : public IWindowFunction
+{
+public:
+    static constexpr auto name = "last_value";
+
+    explicit WindowFunctionLastValue(const DataTypes & argument_types_)
+        : IWindowFunction(argument_types_)
+    {
+        RUNTIME_CHECK(argument_types_.size() == 1);
+        return_type = argument_types_[0];
+    }
+
+    String getName() const override
+    {
+        return name;
+    }
+
+    DataTypePtr getReturnType() const override
+    {
+        return return_type;
+    }
+
+    void windowInsertResultInto(
+        WindowTransformAction & action,
+        size_t function_index,
+        const ColumnNumbers & arguments) override
+    {
+        assert(action.frame_ended);
+        IColumn & to = *action.blockAt(action.current_row).output_columns[function_index];
+
+        // Because [frame_start, frame_end), so we need to get the previous row of the frame_end.
+        RowNumber last_row = action.getPreviousRowNumber(action.frame_end);
+
+        const auto & value_column = *action.inputAt(last_row)[arguments[0]];
+        const auto & value_field = value_column[last_row.row];
+        to.insert(value_field);
+    }
+
+private:
+    DataTypePtr return_type;
 };
 
 /**
@@ -164,25 +244,25 @@ public:
     }
 
     void windowInsertResultInto(
-        WindowBlockInputStreamPtr stream,
+        WindowTransformAction & action,
         size_t function_index,
         const ColumnNumbers & arguments) override
     {
-        const auto & cur_block = stream->blockAt(stream->current_row);
+        const auto & cur_block = action.blockAt(action.current_row);
 
         IColumn & to = *cur_block.output_columns[function_index];
 
-        auto offset = offset_getter(cur_block.input_columns, arguments, stream->current_row.row);
-        auto value_row = stream->current_row;
-        if (Impl::locate(stream, value_row, offset))
+        auto offset = offset_getter(cur_block.input_columns, arguments, action.current_row.row);
+        auto value_row = action.current_row;
+        if (Impl::locate(action, value_row, offset))
         {
-            const auto & value_column = *stream->inputAt(value_row)[arguments[0]];
+            const auto & value_column = *action.inputAt(value_row)[arguments[0]];
             const auto & value_field = value_column[value_row.row];
             to.insert(value_field);
         }
         else
         {
-            default_value_setter(cur_block.input_columns, arguments, stream->current_row.row, to);
+            default_value_setter(cur_block.input_columns, arguments, action.current_row.row, to);
         }
     }
 
@@ -291,11 +371,11 @@ struct LeadImpl
     static constexpr auto name = "lead";
 
     static bool locate(
-        const WindowBlockInputStreamPtr & stream,
+        const WindowTransformAction & action,
         RowNumber & value_row,
         UInt64 offset)
     {
-        return stream->lead(value_row, offset);
+        return action.lead(value_row, offset);
     }
 };
 
@@ -304,11 +384,11 @@ struct LagImpl
     static constexpr auto name = "lag";
 
     static bool locate(
-        const WindowBlockInputStreamPtr & stream,
+        const WindowTransformAction & action,
         RowNumber & value_row,
         UInt64 offset)
     {
-        return stream->lag(value_row, offset);
+        return action.lag(value_row, offset);
     }
 };
 
@@ -319,5 +399,7 @@ void registerWindowFunctions(WindowFunctionFactory & factory)
     factory.registerFunction<WindowFunctionRowNumber>();
     factory.registerFunction<WindowFunctionLeadLagBase<LeadImpl>>();
     factory.registerFunction<WindowFunctionLeadLagBase<LagImpl>>();
+    factory.registerFunction<WindowFunctionFirstValue>();
+    factory.registerFunction<WindowFunctionLastValue>();
 }
 } // namespace DB

@@ -68,23 +68,27 @@ struct RowNumber
     }
 };
 
-class WindowBlockInputStream : public IProfilingBlockInputStream
-    , public std::enable_shared_from_this<WindowBlockInputStream>
+/* Implementation details.*/
+struct WindowTransformAction
 {
-    static constexpr auto NAME = "Window";
+private:
+    // Used for calculating the frame start
+    RowNumber stepToFrameStart(const RowNumber & current_row, const WindowFrame & frame);
+    // Used for calculating the frame end
+    std::tuple<RowNumber, bool> stepToFrameEnd(const RowNumber & current_row, const WindowFrame & frame);
+
+    // distance is left - right.
+    UInt64 distance(RowNumber left, RowNumber right);
 
 public:
-    WindowBlockInputStream(const BlockInputStreamPtr & input, const WindowDescription & window_description_, const String & req_id);
+    WindowTransformAction(const Block & input_header, const WindowDescription & window_description_, const String & req_id);
 
-    Block getHeader() const override { return output_header; };
+    void cleanUp();
 
-    String getName() const override { return NAME; }
-
-    /* Implementation details.*/
     void advancePartitionEnd();
     bool isDifferentFromPrevPartition(UInt64 current_partition_row);
 
-    bool arePeers(const RowNumber & x, const RowNumber & y) const;
+    bool arePeers(const RowNumber & peer_group_last_row, const RowNumber & current_row) const;
 
     void advanceFrameStart();
     void advanceFrameEndCurrentRow();
@@ -107,7 +111,7 @@ public:
 
     const Columns & inputAt(const RowNumber & x) const
     {
-        return const_cast<WindowBlockInputStream *>(this)->inputAt(x);
+        return const_cast<WindowTransformAction *>(this)->inputAt(x);
     }
 
     auto & blockAt(const UInt64 block_number)
@@ -119,7 +123,7 @@ public:
 
     const auto & blockAt(const UInt64 block_number) const
     {
-        return const_cast<WindowBlockInputStream *>(this)->blockAt(block_number);
+        return const_cast<WindowTransformAction *>(this)->blockAt(block_number);
     }
 
     auto & blockAt(const RowNumber & x)
@@ -129,7 +133,7 @@ public:
 
     const auto & blockAt(const RowNumber & x) const
     {
-        return const_cast<WindowBlockInputStream *>(this)->blockAt(x);
+        return const_cast<WindowTransformAction *>(this)->blockAt(x);
     }
 
     size_t blockRowsNumber(const RowNumber & x) const
@@ -144,7 +148,9 @@ public:
         return window_blocks[x.block - first_block_number].output_columns;
     }
 
-    void advanceRowNumber(RowNumber & x) const;
+    void advanceRowNumber(RowNumber & row_num) const;
+
+    RowNumber getPreviousRowNumber(const RowNumber & row_num) const;
 
     bool lead(RowNumber & x, size_t offset) const;
 
@@ -161,16 +167,12 @@ public:
 
     bool onlyHaveRowNumber();
 
-    bool onlyHaveRowNumberAndRank();
+    Int64 getPartitionEndRow(size_t block_rows);
 
-protected:
-    Block readImpl() override;
-    void appendInfo(FmtBuffer & buffer) const override;
-    bool returnIfCancelledOrKilled();
+    void appendInfo(FmtBuffer & buffer) const;
 
     LoggerPtr log;
 
-public:
     bool input_is_finished = false;
 
     Block output_header;
@@ -210,6 +212,7 @@ public:
 
     // The row for which we are now computing the window functions.
     RowNumber current_row;
+
     // The start of current peer group, needed for CURRENT ROW frame start.
     // For ROWS frame, always equal to the current row, and for RANGE and GROUP
     // frames may be earlier.
@@ -241,8 +244,26 @@ public:
 
     //TODO: used as template parameters
     bool only_have_row_number = false;
-    bool only_have_pure_window = false;
-    Int64 getPartitionEndRow(size_t block_rows);
+};
+
+class WindowBlockInputStream : public IProfilingBlockInputStream
+{
+    static constexpr auto NAME = "Window";
+
+public:
+    WindowBlockInputStream(const BlockInputStreamPtr & input, const WindowDescription & window_description_, const String & req_id);
+
+    Block getHeader() const override { return action.output_header; };
+
+    String getName() const override { return NAME; }
+
+protected:
+    Block readImpl() override;
+    void appendInfo(FmtBuffer & buffer) const override;
+    bool returnIfCancelledOrKilled();
+
+private:
+    WindowTransformAction action;
 };
 
 } // namespace DB

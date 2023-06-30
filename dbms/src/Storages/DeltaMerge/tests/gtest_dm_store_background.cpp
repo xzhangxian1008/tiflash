@@ -12,12 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <Common/FailPoint.h>
 #include <Common/SyncPoint/SyncPoint.h>
+#include <Interpreters/Context.h>
 #include <Storages/DeltaMerge/DeltaMergeStore.h>
 #include <Storages/DeltaMerge/GCOptions.h>
 #include <Storages/DeltaMerge/tests/gtest_dm_simple_pk_test_basic.h>
 
 #include <future>
+#include <random>
 
 namespace DB
 {
@@ -96,13 +99,13 @@ try
     ASSERT_EQ(gc_n, 0);
 
     // In this case, merge two segments will exceed small_segment_rows, so no merge will happen
-    db_context->getGlobalContext().getSettingsRef().dt_segment_limit_rows = 55 * 3;
+    db_context->getGlobalContext().getSettingsRef().dt_segment_limit_rows = 55;
     gc_n = store->onSyncGc(100, gc_options);
     ASSERT_EQ(std::vector<Int64>({0, 50, 100, 150, 200}), getSegmentBreakpoints());
     ASSERT_EQ(gc_n, 0);
 
     // In this case, we will only merge two segments and then stop.
-    db_context->getGlobalContext().getSettingsRef().dt_segment_limit_rows = 105 * 3;
+    db_context->getGlobalContext().getSettingsRef().dt_segment_limit_rows = 105;
     gc_n = store->onSyncGc(100, gc_options);
     ASSERT_EQ(std::vector<Int64>({0, 100, 200}), getSegmentBreakpoints());
     ASSERT_EQ(gc_n, 2);
@@ -127,7 +130,7 @@ try
     ensureSegmentBreakpoints({0, 50, 100, 150, 200});
 
     // In this case, we will only merge two segments and then stop.
-    db_context->getGlobalContext().getSettingsRef().dt_segment_limit_rows = 105 * 3;
+    db_context->getGlobalContext().getSettingsRef().dt_segment_limit_rows = 105;
     auto gc_n = store->onSyncGc(1, gc_options);
     ASSERT_EQ(std::vector<Int64>({0, 100, 150, 200}), getSegmentBreakpoints());
     ASSERT_EQ(gc_n, 1);

@@ -14,10 +14,16 @@
 
 #pragma once
 
+#include <Storages/DeltaMerge/ScanContext.h>
 #include <common/types.h>
+#include <tipb/select.pb.h>
+
+#include <memory>
 
 namespace DB
 {
+
+struct BaseRuntimeStatistics;
 /// do not need be thread safe since it is only used in single thread env
 struct ExecutionSummary
 {
@@ -25,9 +31,15 @@ struct ExecutionSummary
     UInt64 num_produced_rows = 0;
     UInt64 num_iterations = 0;
     UInt64 concurrency = 0;
+
+    DM::ScanContextPtr scan_context = std::make_shared<DB::DM::ScanContext>();
+
     ExecutionSummary() = default;
 
-    void merge(const ExecutionSummary & other, bool streaming_call);
+    void merge(const ExecutionSummary & other);
+    void merge(const tipb::ExecutorExecutionSummary & other);
+    void fill(const BaseRuntimeStatistics & other);
+    void init(const tipb::ExecutorExecutionSummary & other);
 };
 
 } // namespace DB

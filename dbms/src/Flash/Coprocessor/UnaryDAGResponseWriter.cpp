@@ -1,4 +1,4 @@
-// Copyright 2022 PingCAP, Ltd.
+// Copyright 2023 PingCAP, Ltd.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 #include <DataStreams/IProfilingBlockInputStream.h>
 #include <Flash/Coprocessor/ArrowChunkCodec.h>
 #include <Flash/Coprocessor/CHBlockChunkCodec.h>
+#include <Flash/Coprocessor/DAGContext.h>
 #include <Flash/Coprocessor/DefaultChunkCodec.h>
 #include <Flash/Coprocessor/UnaryDAGResponseWriter.h>
 
@@ -70,14 +71,21 @@ void UnaryDAGResponseWriter::appendWarningsToDAGResponse()
     dag_response->set_warning_count(dag_context.getWarningCount());
 }
 
-void UnaryDAGResponseWriter::finishWrite()
+void UnaryDAGResponseWriter::flush()
 {
     if (current_records_num > 0)
     {
         encodeChunkToDAGResponse();
     }
+    // TODO separate from UnaryDAGResponseWriter and support mpp/batchCop.
     appendWarningsToDAGResponse();
-    summary_collector.addExecuteSummaries(*dag_response, false);
+
+    // Under some test cases, there may be dag response whose size is bigger than INT_MAX, and GRPC can not limit it.
+    // Throw exception to prevent receiver from getting wrong response.
+    if (unlikely(accurate::greaterOp(dag_response->ByteSizeLong(), std::numeric_limits<int>::max())))
+        throw TiFlashException(
+            "DAG response is too big, please check config about region size or region merge scheduler",
+            Errors::Coprocessor::Internal);
 }
 
 void UnaryDAGResponseWriter::write(const Block & block)

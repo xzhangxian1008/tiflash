@@ -19,6 +19,7 @@
 
 namespace DB::mock
 {
+// true: unbounded, false: not unbounded
 using MockWindowFrameBound = std::tuple<tipb::WindowBoundType, bool, UInt64>;
 struct MockWindowFrame
 {
@@ -27,7 +28,6 @@ struct MockWindowFrame
     std::optional<MockWindowFrameBound> end;
     // TODO: support calcFuncs
 };
-
 using ASTPartitionByElement = ASTOrderByElement;
 
 class WindowBinder : public ExecutorBinder

@@ -23,6 +23,7 @@
 #include <Poco/StringTokenizer.h>
 #include <Storages/MutableSupport.h>
 #include <Storages/Transaction/Collator.h>
+#include <Storages/Transaction/JsonBinary.h>
 #include <Storages/Transaction/TiDB.h>
 #include <TiDB/Schema/SchemaNameMapper.h>
 #include <common/logger_useful.h>
@@ -524,10 +525,40 @@ try
 
     auto defs_json = json->getArray("definitions");
     definitions.clear();
+    std::unordered_set<TableID> part_id_set;
     for (size_t i = 0; i < defs_json->size(); i++)
     {
         PartitionDefinition definition(defs_json->getObject(i));
         definitions.emplace_back(definition);
+        part_id_set.emplace(definition.id);
+    }
+
+    auto add_defs_json = json->getArray("adding_definitions");
+    if (!add_defs_json.isNull())
+    {
+        for (size_t i = 0; i < add_defs_json->size(); i++)
+        {
+            PartitionDefinition definition(add_defs_json->getObject(i));
+            if (part_id_set.count(definition.id) == 0)
+            {
+                definitions.emplace_back(definition);
+                part_id_set.emplace(definition.id);
+            }
+        }
+    }
+
+    auto drop_defs_json = json->getArray("dropping_definitions");
+    if (!drop_defs_json.isNull())
+    {
+        for (size_t i = 0; i < drop_defs_json->size(); i++)
+        {
+            PartitionDefinition definition(drop_defs_json->getObject(i));
+            if (part_id_set.count(definition.id) == 0)
+            {
+                definitions.emplace_back(definition);
+                part_id_set.emplace(definition.id);
+            }
+        }
     }
 
     num = json->getValue<UInt64>("num");
@@ -548,6 +579,10 @@ try
 {
     Poco::JSON::Object::Ptr json = new Poco::JSON::Object();
     json->set("Count", count);
+    if (available)
+    {
+        json->set("Available", *available);
+    }
 
 #ifndef NDEBUG
     // Check stringify in Debug mode
@@ -568,6 +603,10 @@ void TiFlashReplicaInfo::deserialize(Poco::JSON::Object::Ptr & json)
 try
 {
     count = json->getValue<UInt64>("Count");
+    if (json->has("Available"))
+    {
+        available = json->getValue<bool>("Available");
+    }
 }
 catch (const Poco::Exception & e)
 {
@@ -587,6 +626,7 @@ try
 
     Poco::JSON::Object::Ptr json = new Poco::JSON::Object();
     json->set("id", id);
+    json->set("keyspace_id", keyspace_id);
     Poco::JSON::Object::Ptr name_json = new Poco::JSON::Object();
     name_json->set("O", name);
     name_json->set("L", name);
@@ -615,6 +655,10 @@ try
     Poco::Dynamic::Var result = parser.parse(json_str);
     auto obj = result.extract<Poco::JSON::Object::Ptr>();
     id = obj->getValue<DatabaseID>("id");
+    if (obj->has("keyspace_id"))
+    {
+        keyspace_id = obj->getValue<KeyspaceID>("keyspace_id");
+    }
     name = obj->get("db_name").extract<Poco::JSON::Object::Ptr>()->get("L").convert<String>();
     charset = obj->get("charset").convert<String>();
     collate = obj->get("collate").convert<String>();
@@ -776,14 +820,23 @@ catch (const Poco::Exception & e)
 ///////////////////////
 ////// TableInfo //////
 ///////////////////////
-TableInfo::TableInfo(Poco::JSON::Object::Ptr json)
+TableInfo::TableInfo(Poco::JSON::Object::Ptr json, KeyspaceID keyspace_id_)
 {
     deserialize(json);
+    if (keyspace_id == NullspaceID)
+    {
+        keyspace_id = keyspace_id_;
+    }
 }
 
-TableInfo::TableInfo(const String & table_info_json)
+TableInfo::TableInfo(const String & table_info_json, KeyspaceID keyspace_id_)
 {
     deserialize(table_info_json);
+    // If the table_info_json has no keyspace id, we use the keyspace_id_ as the default value.
+    if (keyspace_id == NullspaceID)
+    {
+        keyspace_id = keyspace_id_;
+    }
 }
 
 String TableInfo::serialize() const
@@ -793,6 +846,7 @@ try
 
     Poco::JSON::Object::Ptr json = new Poco::JSON::Object();
     json->set("id", id);
+    json->set("keyspace_id", keyspace_id);
     Poco::JSON::Object::Ptr name_json = new Poco::JSON::Object();
     name_json->set("O", name);
     name_json->set("L", name);
@@ -863,6 +917,10 @@ void TableInfo::deserialize(Poco::JSON::Object::Ptr obj)
 try
 {
     id = obj->getValue<TableID>("id");
+    if (obj->has("keyspace_id"))
+    {
+        keyspace_id = obj->getValue<KeyspaceID>("keyspace_id");
+    }
     name = obj->getObject("name")->getValue<String>("L");
 
     auto cols_arr = obj->getArray("cols");
@@ -988,8 +1046,8 @@ CodecFlag ColumnInfo::getCodecFlag() const
 #ifdef M
 #error "Please undefine macro M first."
 #endif
-#define M(tt, v, cf, ct, w) \
-    case Type##tt:          \
+#define M(tt, v, cf, ct) \
+    case Type##tt:       \
         return getCodecFlagBase<CodecFlag##cf>(hasUnsignedFlag());
         COLUMN_TYPES(M)
 #undef M
@@ -1018,6 +1076,11 @@ ColumnID TableInfo::getColumnID(const String & name) const
     throw DB::Exception(
         std::string(__PRETTY_FUNCTION__) + ": Unknown column name " + name,
         DB::ErrorCodes::LOGICAL_ERROR);
+}
+
+KeyspaceID TableInfo::getKeyspaceID() const
+{
+    return keyspace_id;
 }
 
 String TableInfo::getColumnName(const ColumnID id) const
@@ -1091,13 +1154,15 @@ TableInfoPtr TableInfo::producePartitionTableInfo(TableID table_or_partition_id,
 
     new_table->name = name_mapper.mapPartitionName(*new_table);
 
+    new_table->replica_info = replica_info;
+
     return new_table;
 }
 
 String genJsonNull()
 {
     // null
-    const static String null({static_cast<char>(DB::TYPE_CODE_LITERAL), static_cast<char>(DB::LITERAL_NIL)});
+    const static String null({static_cast<char>(DB::JsonBinary::TYPE_CODE_LITERAL), static_cast<char>(DB::JsonBinary::LITERAL_NIL)});
     return null;
 }
 
@@ -1140,6 +1205,15 @@ ColumnInfo toTiDBColumnInfo(const tipb::ColumnInfo & tipb_column_info)
     for (int i = 0; i < tipb_column_info.elems_size(); ++i)
         tidb_column_info.elems.emplace_back(tipb_column_info.elems(i), i + 1);
     return tidb_column_info;
+}
+
+std::vector<ColumnInfo> toTiDBColumnInfos(const ::google::protobuf::RepeatedPtrField<tipb::ColumnInfo> & tipb_column_infos)
+{
+    std::vector<ColumnInfo> tidb_column_infos;
+    tidb_column_infos.reserve(tipb_column_infos.size());
+    for (const auto & tipb_column_info : tipb_column_infos)
+        tidb_column_infos.emplace_back(toTiDBColumnInfo(tipb_column_info));
+    return tidb_column_infos;
 }
 
 } // namespace TiDB

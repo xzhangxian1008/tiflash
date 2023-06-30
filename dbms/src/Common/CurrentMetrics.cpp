@@ -26,6 +26,9 @@
     M(MemoryCapacity)                           \
     M(PSMVCCNumSnapshots)                       \
     M(PSMVCCSnapshotsList)                      \
+    M(PSMVCCNumDelta)                           \
+    M(PSMVCCNumBase)                            \
+    M(PSPendingWriterNum)                       \
     M(RWLockWaitingReaders)                     \
     M(RWLockWaitingWriters)                     \
     M(RWLockActiveReaders)                      \
@@ -33,6 +36,7 @@
     M(StoreSizeCapacity)                        \
     M(StoreSizeAvailable)                       \
     M(StoreSizeUsed)                            \
+    M(StoreSizeUsedRemote)                      \
     M(DT_DeltaMerge)                            \
     M(DT_DeltaCompact)                          \
     M(DT_DeltaFlush)                            \
@@ -49,18 +53,34 @@
     M(DT_SnapshotOfReadRaw)                     \
     M(DT_SnapshotOfSegmentSplit)                \
     M(DT_SnapshotOfSegmentMerge)                \
+    M(DT_SnapshotOfSegmentIngest)               \
     M(DT_SnapshotOfDeltaMerge)                  \
     M(DT_SnapshotOfDeltaCompact)                \
     M(DT_SnapshotOfPlaceIndex)                  \
+    M(DT_SnapshotOfBitmapFilter)                \
+    M(DT_SnapshotOfDisaggReadNodeRead)          \
     M(IOLimiterPendingBgWriteReq)               \
     M(IOLimiterPendingFgWriteReq)               \
     M(IOLimiterPendingBgReadReq)                \
     M(IOLimiterPendingFgReadReq)                \
+    M(S3LockServiceNumLatches)                  \
     M(StoragePoolV2Only)                        \
     M(StoragePoolV3Only)                        \
     M(StoragePoolMixMode)                       \
     M(RegionPersisterRunMode)                   \
-    M(GlobalStorageRunMode)
+    M(S3Requests)                               \
+    M(GlobalStorageRunMode)                     \
+    M(GlobalThread)                             \
+    M(GlobalThreadActive)                       \
+    M(LocalThread)                              \
+    M(LocalThreadActive)                        \
+    M(DTFileCacheCapacity)                      \
+    M(DTFileCacheUsed)                          \
+    M(PageCacheCapacity)                        \
+    M(PageCacheUsed)                            \
+    M(ConnectionPoolSize)                       \
+    M(MemoryTrackingQueryStorageTask)           \
+    M(MemoryTrackingFetchPages)
 
 namespace CurrentMetrics
 {

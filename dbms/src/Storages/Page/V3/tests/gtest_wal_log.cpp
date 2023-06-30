@@ -101,7 +101,7 @@ private:
     ReportCollector report;
     std::unique_ptr<LogWriter> writer;
     std::unique_ptr<LogReader> reader;
-    Poco::Logger * log;
+    LoggerPtr log;
 
 protected:
     String path;
@@ -115,11 +115,11 @@ protected:
 
 public:
     LogFileRWTest()
-        : log(&Poco::Logger::get("LogFileRWTest"))
+        : log(Logger::get())
         , recyclable_log(std::get<0>(GetParam()))
         , allow_retry_read(std::get<1>(GetParam()))
     {
-        provider = TiFlashTestEnv::getContext().getFileProvider();
+        provider = TiFlashTestEnv::getDefaultFileProvider();
         path = TiFlashTestEnv::getTemporaryPath("LogFileRWTest");
         DB::tests::TiFlashTestEnv::tryRemovePath(path);
 
@@ -810,9 +810,9 @@ INSTANTIATE_TEST_CASE_P(
         return fmt::format("{}_{}", recycle_log, allow_retry_read);
     });
 
-TEST(LogFileRWTest2, ManuallyFlush)
+TEST(LogFileRWTest2, ManuallySync)
 {
-    auto provider = TiFlashTestEnv::getContext().getFileProvider();
+    auto provider = TiFlashTestEnv::getDefaultFileProvider();
     auto path = TiFlashTestEnv::getTemporaryPath("LogFileRWTest2");
     DB::tests::TiFlashTestEnv::tryRemovePath(path);
 
@@ -835,7 +835,7 @@ TEST(LogFileRWTest2, ManuallyFlush)
         ReadBufferFromString buff(payload);
         ASSERT_NO_THROW(writer->addRecord(buff, payload.size()));
     }
-    writer->flush();
+    writer->sync();
 
     auto read_buf = createReadBufferFromFileBaseByFileProvider(
         provider,
