@@ -516,7 +516,7 @@ class Aggregator;
 
 #define AggregationMethodName(NAME) AggregatedDataVariants::AggregationMethod_##NAME
 
-struct AggregatedDataVariants : private boost::noncopyable
+struct AggregatedDataVariants : private boost::noncopyable // Contain agg's result
 {
     /** Working with states of aggregate functions in the pool is arranged in the following (inconvenient) way:
       * - when aggregating, states are created in the pool using IAggregateFunction::create (inside - `placement new` of arbitrary structure);

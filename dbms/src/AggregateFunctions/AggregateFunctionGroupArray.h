@@ -127,7 +127,7 @@ public:
         const auto & value = this->data(place).value;
         size_t size = value.size();
 
-        ColumnArray & arr_to = static_cast<ColumnArray &>(to);
+        auto & arr_to = static_cast<ColumnArray &>(to);
         ColumnArray::Offsets & offsets_to = arr_to.getOffsets();
 
         offsets_to.push_back((offsets_to.size() == 0 ? 0 : offsets_to.back()) + size);

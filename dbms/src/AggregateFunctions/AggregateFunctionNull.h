@@ -53,7 +53,7 @@ extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
 ///  true - return NULL; false - return value from empty aggregation state of nested function.
 
 template <bool result_is_nullable, typename Derived>
-class AggregateFunctionNullBase : public IAggregateFunctionHelper<Derived>
+class AggregateFunctionNullBase : public IAggregateFunctionHelper<Derived> // This is a wrapper around an aggregate function
 {
 protected:
     AggregateFunctionPtr nested_function;

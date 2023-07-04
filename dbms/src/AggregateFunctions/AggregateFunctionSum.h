@@ -27,7 +27,7 @@
 namespace DB
 {
 template <typename T>
-struct AggregateFunctionSumAddImpl
+struct AggregateFunctionSumAddImpl // Calculation Implementation
 {
     static void NO_SANITIZE_UNDEFINED ALWAYS_INLINE add(T & lhs, const T & rhs)
     {
@@ -36,7 +36,7 @@ struct AggregateFunctionSumAddImpl
 };
 
 template <typename T>
-struct AggregateFunctionSumAddImpl<Decimal<T>>
+struct AggregateFunctionSumAddImpl<Decimal<T>> // Calculation Implementation
 {
     template <typename U>
     static void NO_SANITIZE_UNDEFINED ALWAYS_INLINE add(Decimal<T> & lhs, const Decimal<U> & rhs)
@@ -46,10 +46,10 @@ struct AggregateFunctionSumAddImpl<Decimal<T>>
 };
 
 template <typename T>
-struct AggregateFunctionSumData
+struct AggregateFunctionSumData // Storing result value
 {
-    using Impl = AggregateFunctionSumAddImpl<T>;
-    T sum{};
+    using Impl = AggregateFunctionSumAddImpl<T>; // Actual calculation implementation
+    T sum{}; // Store result value
 
     AggregateFunctionSumData() = default;
 
@@ -159,7 +159,7 @@ struct AggregateFunctionSumData
 };
 
 template <typename T>
-struct AggregateFunctionSumKahanData
+struct AggregateFunctionSumKahanData // What does `Kahan` means?
 {
     static_assert(
         std::is_floating_point_v<T>,
@@ -315,7 +315,7 @@ struct NameSumKahan
 };
 
 /// Counts the sum of the numbers.
-template <typename T, typename TResult, typename Data, typename Name = NameSum>
+template <typename T, typename TResult, typename Data, typename Name = NameSum> // T is input value type;  Data is a structure holding result value
 class AggregateFunctionSum final : public IAggregateFunctionDataHelper<Data, AggregateFunctionSum<T, TResult, Data, Name>>
 {
     static_assert(IsDecimal<T> == IsDecimal<TResult>);

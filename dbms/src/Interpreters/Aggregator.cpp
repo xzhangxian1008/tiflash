@@ -675,7 +675,7 @@ ALWAYS_INLINE void Aggregator::executeImplBatch(
         if (inst->offsets)
             inst->batch_that->addBatchArray(rows, places.get(), inst->state_offset, inst->batch_arguments, inst->offsets, aggregates_pool);
         else
-            inst->batch_that->addBatch(rows, places.get(), inst->state_offset, inst->batch_arguments, aggregates_pool);
+            inst->batch_that->addBatch(rows, places.get(), inst->state_offset, inst->batch_arguments, aggregates_pool); // here
     }
 }
 

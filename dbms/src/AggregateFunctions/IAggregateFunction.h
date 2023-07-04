@@ -236,7 +236,7 @@ public:
         {
             for (size_t i = 0; i < batch_size; ++i)
                 if (places[i])
-                    static_cast<const Derived *>(this)->add(places[i] + place_offset, columns, i, arena);
+                    static_cast<const Derived *>(this)->add(places[i] + place_offset, columns, i, arena); // here
         }
     }
 
@@ -489,7 +489,7 @@ struct AggregationCollatorsWrapper<true>
 
 /// Implements several methods for manipulation with data. T - type of structure with data for aggregation.
 template <typename T, typename Derived, bool with_collator = false>
-class IAggregateFunctionDataHelper
+class IAggregateFunctionDataHelper // T is a structure holding result value
     : public IAggregateFunctionHelper<Derived>
     , protected _IAggregateFunctionImpl::CollatorsHolder<with_collator>
 {
