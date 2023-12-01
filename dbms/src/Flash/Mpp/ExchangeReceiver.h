@@ -227,7 +227,6 @@ private:
     bool collected = false;
     int thread_count = 0;
     Int32 local_tunnel_version;
-    Int32 async_recv_version;
 
     std::atomic<Int64> data_size_in_queue;
 };
