@@ -60,10 +60,154 @@ public:
 
     static void testSerializeAndDeserialize(const ColumnPtr & column_ptr)
     {
-        doTestSerializeAndDeserialize(column_ptr, false);
-        doTestSerializeAndDeserialize2(column_ptr, false);
-        doTestSerializeAndDeserialize(column_ptr, true);
-        doTestSerializeAndDeserialize2(column_ptr, true);
+        ASSERT_TRUE(collator);
+        String sort_key_container;
+        ASSERT_EQ(result_col_ptr->size(), new_col_ptr->size());
+        if (result_col_ptr->getFamilyName() == String("Nullable"))
+        {
+            // check ColumnNullable(ColumnArray(XXX)).
+            const auto & expected_nullable_inner_col
+                = checkAndGetColumn<ColumnNullable>(result_col_ptr.get())->getNestedColumnPtr();
+            const auto & actual_nullable_inner_col
+                = checkAndGetColumn<ColumnNullable>(new_col_ptr.get())->getNestedColumnPtr();
+
+            for (size_t i = 0; i < result_col_ptr->size(); ++i)
+                ASSERT_EQ(result_col_ptr->isNullAt(i), new_col_ptr->isNullAt(i));
+
+            if (expected_nullable_inner_col->getFamilyName() == String("Array"))
+            {
+                // get nested non-null rows from inner ColumnArray and compare.
+                auto new_expected_nullable_inner_col = expected_nullable_inner_col->cloneEmpty();
+                IColumn::Offsets selective;
+                for (size_t i = 0; i < result_col_ptr->size(); ++i)
+                {
+                    if (result_col_ptr->isNullAt(i))
+                        continue;
+                    selective.push_back(i);
+                }
+                new_expected_nullable_inner_col->insertSelectiveFrom(
+                    checkAndGetColumn<ColumnNullable>(result_col_ptr.get())->getNestedColumn(),
+                    selective);
+
+                auto new_actual_nullable_inner_col = actual_nullable_inner_col->cloneEmpty();
+                new_actual_nullable_inner_col->insertSelectiveFrom(
+                    checkAndGetColumn<ColumnNullable>(new_col_ptr.get())->getNestedColumn(),
+                    selective);
+
+                checkForColumnWithCollator(
+                    std::move(new_expected_nullable_inner_col),
+                    std::move(new_actual_nullable_inner_col),
+                    collator);
+                return;
+            }
+        }
+
+        if (result_col_ptr->getFamilyName() == String("Array"))
+        {
+            // check ColumnArray(xxx) or ColumnArray(ColumnNullable(xxx)).
+            size_t null_row_idx = 0;
+            for (size_t i = 0; i < result_col_ptr->size(); ++i)
+            {
+                const auto & expected_inner_col = checkAndGetColumn<ColumnArray>(result_col_ptr.get())->getData();
+                const auto & actual_inner_col = checkAndGetColumn<ColumnArray>(new_col_ptr.get())->getData();
+
+                Field expected_arr_field;
+                result_col_ptr->get(i, expected_arr_field);
+                auto expected_arr = expected_arr_field.get<Array>();
+
+                Field actual_arr_field;
+                new_col_ptr->get(i, actual_arr_field);
+                auto actual_arr = actual_arr_field.get<Array>();
+
+                ASSERT_EQ(expected_arr.size(), actual_arr.size());
+
+                for (size_t j = 0; j < expected_arr.size(); ++j, null_row_idx++)
+                {
+                    ASSERT_EQ(expected_inner_col.isNullAt(null_row_idx), actual_inner_col.isNullAt(null_row_idx));
+                    if (expected_inner_col.isNullAt(null_row_idx))
+                        continue;
+
+                    auto expected_str = expected_arr[j].get<String>();
+                    auto sort_key = collator->sortKey(expected_str.data(), expected_str.size(), sort_key_container);
+
+                    const auto & actual_str = actual_arr[j].get<String>();
+                    ASSERT_TRUE(sort_key == actual_str);
+                }
+            }
+        }
+        else if (result_col_ptr->getFamilyName() == String("Tuple"))
+        {
+            // check ColumnTuple(xxx) or ColumnTuple(ColumnNullable(xxx)).
+            // getDataAt() not impl for ColumnTuple
+            ASSERT_EQ(result_col_ptr->size(), new_col_ptr->size());
+            for (size_t i = 0; i < result_col_ptr->size(); ++i)
+            {
+                const auto & expected_inner_col = checkAndGetColumn<ColumnTuple>(result_col_ptr.get())->getColumns()[0];
+                const auto & actual_inner_col = checkAndGetColumn<ColumnTuple>(new_col_ptr.get())->getColumns()[0];
+
+                ASSERT_EQ(expected_inner_col->isNullAt(i), actual_inner_col->isNullAt(i));
+                if (expected_inner_col->isNullAt(i))
+                    continue;
+
+                auto expected_tuple_field = (*result_col_ptr)[i];
+                const auto & expected_tuple = expected_tuple_field.get<Tuple>().toUnderType();
+
+                auto actual_tuple_field = (*new_col_ptr)[i];
+                const auto & actual_tuple = actual_tuple_field.get<Tuple>().toUnderType();
+
+                ASSERT_EQ(expected_tuple.size(), actual_tuple.size());
+
+                for (size_t j = 0; j < expected_tuple.size(); ++j)
+                {
+                    if (checkAndGetColumn<ColumnTuple>(result_col_ptr.get())->getColumns()[j]->getFamilyName()
+                        == String("String"))
+                    {
+                        auto res = expected_tuple[j].get<String>();
+                        auto sort_key = collator->sortKey(res.data(), res.size(), sort_key_container);
+
+                        const auto & actual_str = actual_tuple[j].get<String>();
+                        ASSERT_TRUE(sort_key == actual_str);
+                    }
+                    else
+                    {
+                        ASSERT_TRUE(expected_tuple[j] == actual_tuple[j]);
+                    }
+                }
+            }
+        }
+        else
+        {
+            for (size_t i = 0; i < result_col_ptr->size(); ++i)
+            {
+                ASSERT_EQ(result_col_ptr->isNullAt(i), new_col_ptr->isNullAt(i));
+                if (result_col_ptr->isNullAt(i))
+                    continue;
+                auto res = result_col_ptr->getDataAt(i);
+                auto res_sort_key = collator->sortKey(res.data, res.size, sort_key_container);
+                auto act = new_col_ptr->getDataAt(i);
+                ASSERT_TRUE(res_sort_key == act);
+            }
+        }
+    }
+
+    static void testSerializeAndDeserialize(
+        const ColumnPtr & column_ptr,
+        bool compare_semantics = false,
+        const TiDB::TiDBCollatorPtr & collator = nullptr,
+        String * sort_key_container = nullptr)
+    {
+        if (compare_semantics)
+        {
+            doTestSerializeAndDeserializeForCmp(column_ptr, true, collator, sort_key_container);
+            doTestSerializeAndDeserializeForCmp(column_ptr, false, collator, sort_key_container);
+        }
+        else
+        {
+            doTestSerializeAndDeserialize(column_ptr, false);
+            doTestSerializeAndDeserialize2(column_ptr, false);
+            doTestSerializeAndDeserialize(column_ptr, true);
+            doTestSerializeAndDeserialize2(column_ptr, true);
+        }
     }
 
     static void doTestSerializeAndDeserialize(const ColumnPtr & column_ptr, bool use_nt_align_buffer)
@@ -271,6 +415,18 @@ try
     testCountSerialByteSizeForColumnArray(col_decimal_256, col_offsets, {48, 2 * 48, 3 * 48, 6 * 48, 21 * 48});
 
     testSerializeAndDeserialize(col_decimal_256);
+    testSerializeAndDeserialize(col_decimal_256, true, nullptr, nullptr);
+
+    // Also test row-base interface for ColumnDecimal.
+    Arena arena;
+    const char * begin = nullptr;
+    String sort;
+    auto new_col_ptr = col_decimal_256->cloneEmpty();
+    for (size_t i = 0; i < col_decimal_256->size(); ++i)
+        col_decimal_256->serializeValueIntoArena(i, arena, begin, nullptr, sort);
+    for (size_t i = 0; i < col_decimal_256->size(); ++i)
+        begin = new_col_ptr->deserializeAndInsertFromArena(begin, nullptr);
+    ASSERT_COLUMN_EQ(std::move(col_decimal_256), std::move(new_col_ptr));
 }
 CATCH
 
