@@ -35,6 +35,7 @@
 #include <Flash/Coprocessor/ColumnarScanContext_fwd.h>
 #include <Flash/Coprocessor/DAGRequest.h>
 #include <Flash/Coprocessor/FineGrainedShuffle.h>
+#include <Flash/Coprocessor/HashTableStats.h>
 #include <Flash/Coprocessor/RuntimeFilterMgr.h>
 #include <Flash/Coprocessor/TablesRegionsInfo.h>
 #include <Flash/Executor/toRU.h>
@@ -47,6 +48,7 @@
 #include <Storages/DeltaMerge/ScanContext_fwd.h>
 
 #include <memory>
+#include <optional>
 #include <unordered_set>
 
 namespace DB
@@ -70,6 +72,32 @@ struct JoinProfileInfo
     UInt64 peak_build_bytes_usage = 0;
     bool is_spill_enabled = false;
     bool is_spilled = false;
+    /// Empty only for a cross join, which does not have a hash table.
+    std::optional<HashTableStats> hash_table_stats;
+
+    void setHashTableStats(const HashTableStats & stats)
+    {
+        std::lock_guard lock(hash_table_stats_mutex);
+        hash_table_stats = stats;
+    }
+
+    void mergeHashTableStats(const HashTableStats & stats)
+    {
+        std::lock_guard lock(hash_table_stats_mutex);
+        if (!hash_table_stats)
+            hash_table_stats = stats;
+        else
+            hash_table_stats->merge(stats);
+    }
+
+    std::optional<HashTableStats> getHashTableStats() const
+    {
+        std::lock_guard lock(hash_table_stats_mutex);
+        return hash_table_stats;
+    }
+
+private:
+    mutable std::mutex hash_table_stats_mutex;
 };
 using JoinProfileInfoPtr = std::shared_ptr<JoinProfileInfo>;
 struct JoinExecuteInfo
